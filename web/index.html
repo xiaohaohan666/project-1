@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2563eb">
+<title>模拟校园卡 · 机房上机计费</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232563eb'/><rect x='22' y='32' width='56' height='36' rx='6' fill='white'/><rect x='30' y='42' width='24' height='5' rx='2.5' fill='%232563eb'/></svg>">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ============ 登录 ============ -->
+<div id="login" class="login-wrap">
+  <div class="login-card">
+    <div class="brand">
+      <div class="brand-mark">卡</div>
+      <div><h1>模拟校园卡</h1><p>机房上机计费与消费记录查询</p></div>
+    </div>
+    <div class="tabs" id="loginTabs">
+      <button class="tab active" data-role="student">学生</button>
+      <button class="tab" data-role="admin">管理员</button>
+    </div>
+    <form id="loginForm" autocomplete="off">
+      <label class="field" id="fId">
+        <span>卡号</span>
+        <input id="inId" placeholder="如 C001" autocomplete="username">
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input id="inPwd" type="password" placeholder="演示密码 123456" autocomplete="current-password">
+      </label>
+      <div class="hint" id="loginHint">演示卡号 C001 / C002 / C003，密码 123456</div>
+      <button class="btn primary block" id="btnLogin" type="submit">登 录</button>
+    </form>
+    <div class="login-foot">
+      <button class="link" id="btnAdminTip">管理员密码 admin123</button>
+    </div>
+  </div>
+  <p class="login-note">连错 3 次密码账户会被冻结，需管理员重置｜费率 2.00 元 / 小时</p>
+</div>
+
+<!-- ============ 应用 ============ -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="topbar-in">
+      <div class="brand small">
+        <div class="brand-mark">卡</div>
+        <div><h1>模拟校园卡</h1><p id="topSub">机房上机计费</p></div>
+      </div>
+      <div class="top-right">
+        <span class="pill" id="topRole">学生</span>
+        <button class="btn ghost sm" id="btnRefresh">刷新</button>
+        <button class="btn ghost sm" id="btnLogout">退出</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左栏：卡面与上机 -->
+    <section class="col-left">
+      <div class="card-visual">
+        <div class="cv-top">
+          <span class="cv-brand">CAMPUS CARD</span>
+          <span class="cv-status" id="cvStatus">正常</span>
+        </div>
+        <div class="cv-balance"><em>¥</em><span id="cvRemain">0.00</span></div>
+        <div class="cv-recharge">累计充值 <b id="cvRecharge">0.00</b> 元</div>
+        <div class="cv-foot">
+          <div><label>卡号</label><span id="cvId">—</span></div>
+          <div><label>姓名</label><span id="cvName">—</span></div>
+          <div><label>学号</label><span id="cvNumber">—</span></div>
+        </div>
+      </div>
+
+      <div class="panel" id="panelMachine">
+        <div class="panel-h"><h2>上机服务</h2><span class="rate" id="rateTip">2.00 元 / 小时</span></div>
+        <div id="machineIdle">
+          <select id="selPlace" class="input">
+            <option>A101 机房</option><option>A102 机房</option>
+            <option>B201 电子阅览室</option><option>B203 创新实验室</option>
+          </select>
+          <button class="btn primary block" id="btnOnline">上机登记</button>
+        </div>
+        <div id="machineBusy" class="hidden">
+          <div class="timer">
+            <span id="mTime">00:00:00</span>
+            <small id="mWhere">上机中 · 预估 <b id="mCost">0.00</b> 元</small>
+          </div>
+          <button class="btn danger block" id="btnOffline">下机结账</button>
+        </div>
+      </div>
+
+      <div class="panel" id="panelCardOps">
+        <div class="panel-h"><h2>卡务</h2></div>
+        <div class="tile-grid">
+          <button class="tile" id="tilePwd"><i>🔑</i><b>修改密码</b><small>自设登录密码</small></button>
+          <button class="tile" id="tileLost"><i>🆘</i><b>挂失</b><small>上机中会先结账</small></button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右栏：功能 -->
+    <section class="col-right">
+      <!-- 学生 -->
+      <div id="viewStudent">
+        <div class="panel">
+          <div class="panel-h"><h2>上机统计</h2>
+            <span class="seg" id="segPeriod">
+              <button data-p="day" class="on">今天</button>
+              <button data-p="week">本周</button>
+              <button data-p="month">本月</button>
+              <button data-p="all">全部</button>
+            </span>
+          </div>
+          <div class="stat-grid four">
+            <div class="stat"><label>上机次数</label><b id="stCount">0</b><small>次</small></div>
+            <div class="stat"><label>累计用时</label><b id="stMinutes">0</b><small>分钟</small></div>
+            <div class="stat"><label>累计费用</label><b id="stCost">0.00</b><small>元</small></div>
+            <div class="stat"><label>平均每次</label><b id="stAvg">0</b><small>分钟</small></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h"><h2>上机记录</h2><span class="muted" id="recCount"></span></div>
+          <div class="table-wrap"><table id="tblRecords"><thead>
+            <tr><th>上机日期</th><th>开始时间</th><th class="num">用时(分)</th><th class="num">费用(元)</th><th>状态</th><th>地点</th></tr>
+          </thead><tbody></tbody></table></div>
+        </div>
+      </div>
+
+      <!-- 管理员 -->
+      <div id="viewAdmin" class="hidden">
+        <div class="panel">
+          <div class="panel-h"><h2>当天收入统计</h2><span class="muted" id="incDay"></span></div>
+          <div class="stat-grid four">
+            <div class="stat"><label>上机费收入</label><b id="incFee">0.00</b><small>元</small></div>
+            <div class="stat"><label>上机人次</label><b id="incTimes">0</b><small>次</small></div>
+            <div class="stat"><label>卡片余额合计</label><b id="incRemain">0.00</b><small>元</small></div>
+            <div class="stat"><label>累计充值合计</label><b id="incRecharge">0.00</b><small>元</small></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h"><h2>卡务办理</h2><span class="muted">先选卡号</span></div>
+          <div class="op-row">
+            <select id="selCard" class="input grow"></select>
+            <input id="opAmount" class="input w110" placeholder="金额">
+            <button class="btn primary" data-op="recharge">充值</button>
+          </div>
+          <div class="op-row wrap">
+            <button class="btn" data-op="lost">挂失</button>
+            <button class="btn" data-op="reset">重置学生密码</button>
+            <button class="btn" id="btnViewRec">查看该卡上机记录</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h"><h2>全部校园卡</h2><span class="muted" id="cardSummary"></span></div>
+          <div class="table-wrap"><table id="tblCards"><thead>
+            <tr><th>卡号</th><th>姓名</th><th>学号</th><th class="num">累计充值</th><th class="num">余额</th><th>状态</th><th>上机</th></tr>
+          </thead><tbody></tbody></table></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h"><h2>上机记录</h2><span class="muted" id="admRecTitle">请选择卡号</span></div>
+          <div class="table-wrap"><table id="tblAdmRecords"><thead>
+            <tr><th>卡号</th><th>上机日期</th><th>开始时间</th><th class="num">用时(分)</th><th class="num">费用(元)</th><th>状态</th><th>地点</th></tr>
+          </thead><tbody></tbody></table></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-h"><h3 id="mdTitle">提示</h3><button class="x" id="mdClose">×</button></div>
+    <div class="modal-b" id="mdBody"></div>
+    <div class="modal-f" id="mdFoot"></div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="js/api.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

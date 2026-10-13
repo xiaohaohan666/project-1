@@ -1,0 +1,35 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "C: 构建 main.exe",
+            "type": "shell",
+            "command": "gcc",
+            "args": [
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-O2",
+                "-fexec-charset=UTF-8",
+                "-Isrc",
+                "main.c",
+                "src/campus.c",
+                "-o",
+                "main.exe"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"],
+            "group": { "kind": "build", "isDefault": true },
+            "detail": "源码为 UTF-8，必须带 -fexec-charset=UTF-8，否则中文乱码。"
+        },
+        {
+            "label": "运行: 启动模拟校园卡系统",
+            "type": "shell",
+            "command": "${workspaceFolder}/main.exe",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "group": { "kind": "test" },
+            "detail": "数据保存在 data/ 目录：cards.dat 卡片、<卡号>.txt 上机记录、income.dat 收入流水。"
+        }
+    ]
+}

@@ -1,0 +1,26 @@
+# ---- 编译产物 ----
+*.exe
+*.o
+*.obj
+*.dll
+a.out
+
+# ---- 运行时数据（卡片与上机记录，属个人数据不入库）----
+data/
+!data/.gitkeep
+
+# ---- 编辑器和系统 ----
+.vscode/*
+!.vscode/tasks.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- 临时文件 ----
+*.tmp
+*.log
+
+# ---- 题目原件（含出题人姓名，不纳入公开仓库）----
+*.pdf
+

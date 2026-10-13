@@ -1,0 +1,181 @@
+/* ============================================================
+ *  模拟校园卡 · 界面样式（简洁大方）
+ *  浅灰底 + 白卡面 + 单一蓝色主色；圆角 14px；轻阴影；三档响应式
+ * ============================================================ */
+:root{
+  --bg:#f4f6fa; --panel:#fff; --line:#e8ecf3;
+  --text:#1c2536; --muted:#7a8699;
+  --brand:#2563eb; --brand-dark:#1d4ed8; --brand-soft:#eef3ff;
+  --ok:#059669; --danger:#dc2626; --warn-soft:#fdf3e4;
+  --radius:14px; --radius-sm:10px;
+  --shadow:0 1px 2px rgba(24,39,75,.04), 0 8px 24px rgba(24,39,75,.06);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text);
+  font:15px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{margin:0;font-weight:600}
+.hidden{display:none !important}
+.muted{color:var(--muted);font-size:13px}
+.num{text-align:right}
+
+/* ---------------- 控件 ---------------- */
+.btn{
+  appearance:none;border:1px solid var(--line);background:#fff;color:var(--text);
+  padding:9px 16px;border-radius:var(--radius-sm);font:inherit;font-size:14px;
+  cursor:pointer;transition:.16s;white-space:nowrap;
+}
+.btn:hover{border-color:#d5dbe7;background:#fafbfe}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.btn.primary:hover{background:var(--brand-dark);border-color:var(--brand-dark)}
+.btn.danger{background:var(--danger);border-color:var(--danger);color:#fff}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
+.btn.ghost:hover{background:rgba(37,99,235,.08);color:var(--brand)}
+.btn.block{width:100%;display:block}
+.btn.sm{padding:6px 12px;font-size:13px}
+.btn[disabled]{opacity:.55;cursor:not-allowed}
+.input{
+  width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-sm);
+  background:#fff;font:inherit;color:var(--text);transition:.16s;
+}
+.input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.w110{width:110px}
+.grow{flex:1;min-width:140px}
+.link{background:none;border:0;color:var(--brand);font:inherit;cursor:pointer;padding:0}
+.link:hover{text-decoration:underline}
+.pill{display:inline-block;padding:4px 12px;border-radius:999px;background:var(--brand-soft);
+  color:var(--brand);font-size:13px;font-weight:600}
+
+/* ---------------- 登录 ---------------- */
+.login-wrap{
+  min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:24px;gap:18px;
+  background:radial-gradient(1200px 500px at 50% -10%,#e5edff 0%,transparent 60%),var(--bg);
+}
+.login-card{width:100%;max-width:400px;background:var(--panel);border-radius:18px;
+  box-shadow:var(--shadow);padding:28px 26px 22px}
+.brand{display:flex;align-items:center;gap:12px}
+.brand-mark{width:44px;height:44px;border-radius:12px;background:var(--brand);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;flex:none}
+.brand h1{font-size:19px;letter-spacing:.5px}
+.brand p{margin:0;color:var(--muted);font-size:12.5px}
+.brand.small .brand-mark{width:34px;height:34px;border-radius:9px;font-size:16px}
+.brand.small h1{font-size:16px}
+.brand.small p{font-size:12px}
+.tabs{display:flex;gap:6px;background:#f1f4f9;padding:4px;border-radius:12px;margin:22px 0 18px}
+.tab{flex:1;border:0;background:none;padding:9px;border-radius:9px;font:inherit;font-weight:600;
+  color:var(--muted);cursor:pointer;transition:.16s}
+.tab.active{background:#fff;color:var(--brand);box-shadow:0 1px 3px rgba(24,39,75,.08)}
+.field{display:block;margin-bottom:14px}
+.field span{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+.field input{width:100%;padding:11px 13px;border:1px solid var(--line);
+  border-radius:var(--radius-sm);font:inherit;background:#fcfdff;transition:.16s}
+.field input:focus{outline:none;border-color:var(--brand);background:#fff;
+  box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.hint{font-size:12.5px;color:var(--muted);margin:-4px 0 16px}
+.hint.error{color:var(--danger)}
+.login-foot{margin-top:16px;text-align:center;font-size:13px;color:var(--muted)}
+.login-note{color:var(--muted);font-size:12.5px;text-align:center;max-width:430px;margin:0}
+
+/* ---------------- 顶栏与布局 ---------------- */
+.topbar{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.9);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.topbar-in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;
+  align-items:center;justify-content:space-between;gap:12px}
+.top-right{display:flex;align-items:center;gap:8px}
+.layout{max-width:1180px;margin:0 auto;padding:20px;display:grid;
+  grid-template-columns:340px 1fr;gap:18px;align-items:start}
+.col-left,.col-right{display:flex;flex-direction:column;gap:18px;min-width:0}
+@media(max-width:900px){ .layout{grid-template-columns:1fr;padding:14px} }
+@media(max-width:640px){ .topbar-in{padding:8px 12px} .brand.small h1{font-size:15px} }
+
+/* ---------------- 卡面 ---------------- */
+.card-visual{position:relative;border-radius:18px;padding:20px;color:#fff;overflow:hidden;
+  background:linear-gradient(135deg,#2563eb 0%,#1e40af 55%,#172554 100%);
+  box-shadow:0 10px 30px rgba(30,64,175,.28)}
+.card-visual::after{content:"";position:absolute;right:-40px;top:-60px;width:180px;height:180px;
+  border-radius:50%;background:rgba(255,255,255,.10)}
+.cv-top{display:flex;justify-content:space-between;align-items:center;position:relative}
+.cv-brand{font-size:11.5px;letter-spacing:2px;opacity:.85}
+.cv-status{background:rgba(255,255,255,.2);padding:3px 10px;border-radius:999px;font-size:12px}
+.cv-balance{display:flex;align-items:baseline;gap:4px;margin:18px 0 4px;position:relative}
+.cv-balance em{font-style:normal;font-size:20px;opacity:.85}
+.cv-balance span{font-size:38px;font-weight:700;letter-spacing:-.5px}
+.cv-recharge{font-size:12.5px;opacity:.85;position:relative}
+.cv-foot{display:flex;gap:24px;margin-top:20px;position:relative;flex-wrap:wrap}
+.cv-foot label{display:block;font-size:11.5px;opacity:.75;margin-bottom:2px}
+.cv-foot span{font-size:14.5px;font-weight:600;letter-spacing:.4px}
+
+/* ---------------- 面板与统计块 ---------------- */
+.panel{background:var(--panel);border-radius:var(--radius);box-shadow:var(--shadow);padding:18px}
+.panel-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
+.panel-h h2{font-size:15.5px}
+.rate{font-size:12.5px;color:var(--muted)}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.stat-grid.four{grid-template-columns:repeat(4,1fr)}
+@media(max-width:640px){ .stat-grid.four{grid-template-columns:1fr 1fr} }
+.stat{background:var(--panel);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow)}
+.stat label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:6px}
+.stat b{font-size:20px;font-weight:700;letter-spacing:-.3px}
+.stat small{display:block;font-size:11.5px;color:var(--muted);margin-top:2px}
+
+/* ---------------- 功能磁贴 ---------------- */
+.tile-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px}
+.tile{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;
+  background:#fbfcfe;border:1px solid var(--line);border-radius:var(--radius-sm);
+  padding:13px;cursor:pointer;transition:.16s;font:inherit;color:var(--text)}
+.tile:hover{border-color:#c9d7f5;background:var(--brand-soft);transform:translateY(-1px)}
+.tile i{font-style:normal;font-size:19px;margin-bottom:4px}
+.tile b{font-size:14px}
+.tile small{color:var(--muted);font-size:11.5px}
+
+/* ---------------- 表格 ---------------- */
+.table-wrap{margin:0 -6px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{font-size:12.5px;color:var(--muted);font-weight:600}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#fafbfe}
+.empty{text-align:center;color:var(--muted);padding:22px 10px;font-size:13.5px}
+
+/* ---------------- 上机计时 ---------------- */
+.timer{display:flex;flex-direction:column;align-items:center;gap:2px;padding:14px;
+  background:var(--brand-soft);border-radius:var(--radius-sm);margin-bottom:12px}
+.timer span{font-size:30px;font-weight:700;letter-spacing:1px;color:var(--brand-dark);
+  font-variant-numeric:tabular-nums}
+.timer small{color:var(--muted);font-size:12.5px}
+
+/* ---------------- 时间段切换 ---------------- */
+.seg{display:inline-flex;gap:4px;background:#f1f4f9;padding:3px;border-radius:10px}
+.seg button{border:0;background:none;padding:5px 12px;border-radius:8px;font:inherit;
+  font-size:13px;color:var(--muted);cursor:pointer;transition:.16s}
+.seg button.on{background:#fff;color:var(--brand);font-weight:600;
+  box-shadow:0 1px 3px rgba(24,39,75,.08)}
+
+/* ---------------- 操作行 ---------------- */
+.op-row{display:flex;gap:10px;margin-bottom:10px;align-items:center}
+.op-row.wrap{flex-wrap:wrap}
+@media(max-width:640px){ .op-row{flex-wrap:wrap} }
+
+/* ---------------- 弹窗与提示条 ---------------- */
+.modal{position:fixed;inset:0;background:rgba(20,28,45,.42);display:flex;align-items:center;
+  justify-content:center;padding:20px;z-index:60}
+.modal-card{background:#fff;border-radius:var(--radius);width:100%;max-width:420px;
+  box-shadow:0 24px 60px rgba(16,24,40,.24);overflow:hidden}
+.modal-h{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;
+  border-bottom:1px solid var(--line)}
+.modal-h h3{font-size:15.5px}
+.modal-h .x{border:0;background:none;font-size:22px;line-height:1;color:var(--muted);cursor:pointer}
+.modal-b{padding:18px;max-height:56vh;overflow:auto}
+.modal-f{padding:0 18px 18px;display:flex;gap:10px;justify-content:flex-end}
+.field-row{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.field-row label{font-size:13px;color:var(--muted)}
+.toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%);
+  background:#111c33;color:#fff;padding:11px 20px;border-radius:999px;font-size:14px;
+  box-shadow:0 12px 30px rgba(16,24,40,.3);z-index:80;max-width:88vw;text-align:center}
+.toast.ok{background:#047857}
+.toast.err{background:#b91c1c}
