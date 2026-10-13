@@ -131,7 +131,34 @@ static int j_get_str(const char *body, const char *key, char *out, int osz) {
     while (*p == ' ' || *p == ':' || *p == '\t') p++;
     if (*p != '"') return 0;
     p++;
-    while (*p && *p != '"' && i < osz - 1) out[i++] = *p++;
+    while (*p && *p != '"' && i < osz - 1) {
+        if (p[0] == '\\' && p[1] == 'u' && isxdigit((unsigned char)p[2])) {
+            /* 兼容 \uXXXX 转义：转成 UTF-8 写入。前端 JSON.stringify 一般直接
+             * 发原始 UTF-8，但其他客户端（如 Python json.dumps）可能发转义形式 */
+            unsigned int cp = 0;
+            int k;
+            for (k = 2; k < 6 && isxdigit((unsigned char)p[k]); k++) {
+                int d = (p[k] <= '9') ? p[k] - '0' : ((p[k] | 0x20) - 'a' + 10);
+                cp = cp * 16 + (unsigned)d;
+            }
+            if (cp < 0x80) {
+                out[i++] = (char)cp;
+            } else if (cp < 0x800) {
+                if (i + 1 < osz) {
+                    out[i++] = (char)(0xC0 | (cp >> 6));
+                    out[i++] = (char)(0x80 | (cp & 0x3F));
+                }
+            } else if (i + 2 < osz) {
+                out[i++] = (char)(0xE0 | (cp >> 12));
+                out[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                out[i++] = (char)(0x80 | (cp & 0x3F));
+            }
+            p += 6;
+            continue;
+        }
+        if (p[0] == '\\' && p[1]) p++;      /* 其他转义：取原字符 */
+        out[i++] = *p++;
+    }
     out[i] = '\0';
     return 1;
 }
@@ -489,6 +516,31 @@ static void serve_static(sock_t fd, const char *path) {
     free(buf);
 }
 
+/* 取请求头字段值（头名不区分大小写）。
+ * req 完整请求报文；name 头名；out 输出；osz 缓冲大小。找到返回 1 */
+static int header_value(const char *req, const char *name, char *out, int osz) {
+    size_t nlen = strlen(name);
+    const char *p = req;
+    out[0] = '\0';
+    /* 逐行扫描请求头，遇到空行（头部结束）即停止 */
+    while (p && *p) {
+        const char *eol = strstr(p, "\r\n");
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len == 0) break;                        /* 空行：请求头结束 */
+        if (len > nlen && !_strnicmp(p, name, (int)nlen) && p[nlen] == ':') {
+            const char *v = p + nlen + 1;
+            while (*v == ' ' || *v == '\t') v++;
+            int i = 0;
+            while (v < p + len && i < osz - 1) out[i++] = *v++;
+            out[i] = '\0';
+            return 1;
+        }
+        if (!eol) break;
+        p = eol + 2;
+    }
+    return 0;
+}
+
 /* ============================================================
  *                   连接处理与主函数
  * ============================================================ */
@@ -526,16 +578,13 @@ static void handle_conn(sock_t fd) {
     body = strstr(req, "\r\n\r\n");
     body = body ? body + 4 : req + strlen(req);
 
-    /* 3. 令牌与密码优先取请求头，其次查询串 */
+    /* 3. 令牌与密码优先取请求头（HTTP 头名大小写不敏感），其次查询串 */
     {
-        char *h;
         char v[24];
-        h = strstr(req, "X-Token:");
-        if (h && sscanf(h + 8, "%23s", v) == 1)
+        if (header_value(req, "X-Token", v, sizeof(v)))
             snprintf(query + strlen(query), sizeof(query) - strlen(query),
                      "%stoken=%s", *query ? "&" : "", v);
-        h = strstr(req, "X-Pwd:");
-        if (h && sscanf(h + 6, "%23s", v) == 1)
+        if (header_value(req, "X-Pwd", v, sizeof(v)))
             snprintf(query + strlen(query), sizeof(query) - strlen(query),
                      "%spwd=%s", *query ? "&" : "", v);
     }
