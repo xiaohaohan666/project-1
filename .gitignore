@@ -20,6 +20,14 @@ Thumbs.db
 # ---- 临时文件 ----
 *.tmp
 *.log
+lhr.log
+run/
+
+# ---- 隧道私钥（切勿入库）----
+.ssh/
+tunnelkey
+tunnelkey.pub
+known_hosts_tunnel
 
 # ---- 题目原件（含出题人姓名，不纳入公开仓库）----
 *.pdf
