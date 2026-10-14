@@ -612,6 +612,19 @@ static void h_admin_op(const char *token, const char *pwd, const char *body,
         int type = (int)j_get_num(body, "type", TX_GRANT);
         j_get_str(body, "memo", memo, sizeof(memo));
         if (campus_grant(k, type, amount, memo, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "pay")) {
+        /* 管理端代扣：模拟商户 POS。金额与交易密码由持卡人在终端输入，
+         * 服务端仍按一卡通规则校验密码、限额与余额 */
+        char merchant[24] = "", pay[20] = "", dev[16] = "";
+        double amount = j_get_num(body, "amount", 0);
+        j_get_str(body, "merchant", merchant, sizeof(merchant));
+        j_get_str(body, "payPwd", pay, sizeof(pay));
+        j_get_str(body, "device", dev, sizeof(dev));
+        if (campus_pay(k, merchant, amount, pay, *dev ? dev : "ADMIN-POS",
+                       err, sizeof(err))) {
+            res_err(err);
+            return;
+        }
     } else {
         res_err("未知操作");
         return;

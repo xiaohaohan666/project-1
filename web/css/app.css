@@ -242,3 +242,34 @@ body.is-offline .card-visual { filter: grayscale(.35); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ============================================================
+ *  一卡通界面：主导航、视图、字段行
+ * ============================================================ */
+.mainnav {
+  display: flex; gap: 6px; overflow-x: auto; padding: 4px;
+  background: #f1f4f9; border-radius: 12px; margin-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+.mainnav::-webkit-scrollbar { display: none; }
+.nav-btn {
+  flex: 1 0 auto; border: 0; background: none; padding: 9px 14px;
+  border-radius: 9px; font: inherit; font-size: 14px; font-weight: 600;
+  color: var(--muted); cursor: pointer; white-space: nowrap; transition: .16s;
+}
+.nav-btn:hover { color: var(--brand); }
+.nav-btn.on { background: #fff; color: var(--brand); box-shadow: 0 1px 3px rgba(24,39,75,.08); }
+
+.view { display: flex; flex-direction: column; gap: 18px; }
+.field-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.field-row > label { font-size: 13px; color: var(--muted); }
+.mt8 { margin-top: 8px; }
+.mt12 { margin-top: 12px; }
+
+/* 消费点下拉与金额输入在窄屏下堆叠 */
+.op-row select, .op-row input { min-width: 0; }
+
+@media (max-width: 640px) {
+  .nav-btn { font-size: 13px; padding: 8px 11px; }
+  .stat-grid.four { grid-template-columns: 1fr 1fr; }
+}

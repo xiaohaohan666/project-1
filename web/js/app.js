@@ -1,23 +1,33 @@
 /* ============================================================
- *  app.js —— 页面状态与业务交互
+ *  app.js —— 一卡通页面状态与业务交互
+ *  结构：登录/注册 → 进入应用 → 按角色显示导航 → 切换视图
+ *  视图由 nav 上的 data-view 与 section 上的 data-view 对应
  * ============================================================ */
 (() => {
-  const { $, $$, ok, err, prompt, money, esc, emptyRow } = UI;
-  const state = { admin: false, card: null, period: 'day', timer: null, rate: 2 };
+  const { $, $$, ok, err, prompt, money, esc, emptyRow, openModal } = UI;
+  const state = {
+    admin: false, card: null, timer: null, rate: 2,
+    view: '', period: { ledger: 'day', consume: 'day', stats: 'day' }
+  };
 
-  /* ---------------- 登录 ---------------- */
+  /* ---------------- 登录 / 注册 ---------------- */
   let role = 'student';
+  const HINTS = {
+    student: '演示卡号 C001 / C002 / C003，密码 123456',
+    admin: '演示管理员密码 admin123',
+    register: '注册后交易密码默认取学号后 6 位'
+  };
   $$('#loginTabs .tab').forEach((t) => {
     t.onclick = () => {
       $$('#loginTabs .tab').forEach((x) => x.classList.remove('active'));
       t.classList.add('active');
       role = t.dataset.role;
       $('#fId').classList.toggle('hidden', role === 'admin');
+      $('#regFields').classList.toggle('hidden', role !== 'register');
+      $('#btnLogin').textContent = role === 'register' ? '注 册' : '登 录';
       const h = $('#loginHint');
       h.classList.remove('error');
-      h.textContent = role === 'admin'
-        ? '演示管理员密码 admin123'
-        : '演示卡号 C001 / C002 / C003，密码 123456';
+      h.textContent = HINTS[role];
     };
   });
 
@@ -29,11 +39,19 @@
     hint.classList.remove('error');
     $('#btnLogin').disabled = true;
     try {
-      const r = await API.login(id, pwd, role === 'admin');
-      API.setAuth(r.token, pwd);           /* 保存身份，后续请求自动携带 */
-      state.admin = !!r.admin;
-      state.card = r.card;
-      enterApp();
+      if (role === 'register') {
+        const r = await API.register(id, $('#inName').value.trim(),
+                                     $('#inNumber').value.trim(), pwd);
+        hint.textContent = `注册成功：${r.card.id} ${r.card.name}，请用该密码登录`;
+        $$('#loginTabs .tab')[0].click();          /* 切回学生登录 */
+        $('#inId').value = r.card.id;
+      } else {
+        const r = await API.login(id, pwd, role === 'admin');
+        API.setAuth(r.token, pwd);
+        state.admin = !!r.admin;
+        state.card = r.card;
+        enterApp();
+      }
     } catch (ex) {
       hint.textContent = ex.message;
       hint.classList.add('error');
@@ -43,16 +61,34 @@
   };
   $('#btnAdminTip').onclick = () => $$('#loginTabs .tab')[1].click();
 
+  /* ---------------- 视图切换 ---------------- */
+  function switchView(name) {
+    state.view = name;
+    $$('#mainnav .nav-btn').forEach((b) =>
+      b.classList.toggle('on', b.dataset.view === name));
+    $$('.view').forEach((v) =>
+      v.classList.toggle('hidden', v.dataset.view !== name));
+    refresh();
+  }
+  $$('#mainnav .nav-btn').forEach((b) => {
+    b.onclick = () => switchView(b.dataset.view);
+  });
+
   /* ---------------- 进入 / 退出 ---------------- */
   function enterApp() {
     $('#login').classList.add('hidden');
     $('#app').classList.remove('hidden');
-    $('#installHint')?.classList.add('hidden');   /* 已进主界面，收起安装引导 */
+    $('#installHint')?.classList.add('hidden');
     $('#topRole').textContent = state.admin ? '管理员' : '学生';
-    $('#topSub').textContent = state.admin ? '机房管理端' : '机房上机计费';
+    $('#topSub').textContent = state.admin ? '一卡通管理端' : '一卡通学生端';
     $('#viewStudent').classList.toggle('hidden', state.admin);
     $('#viewAdmin').classList.toggle('hidden', !state.admin);
-    refresh();
+    /* 管理员与学生的默认视图不同 */
+    $$('#mainnav .nav-btn').forEach((b) => {
+      const isAdminBtn = b.classList.contains('admin-only');
+      b.classList.toggle('hidden', state.admin ? !isAdminBtn : isAdminBtn);
+    });
+    switchView(state.admin ? 'admin-pos' : 'student-consume');
   }
   $('#btnLogout').onclick = () => {
     API.setAuth('', '');
@@ -62,16 +98,16 @@
     $('#app').classList.add('hidden');
     $('#login').classList.remove('hidden');
     $('#inPwd').value = '';
-    /* 回到登录页后，若浏览器支持安装则重新露出安装引导 */
     if (window.PWA && window.PWA.canInstall) $('#installHint')?.classList.remove('hidden');
   };
   $('#btnRefresh').onclick = () => refresh(true);
 
-  /* 统一刷新入口。manual 为真时给出提示 */
+  /* ---------------- 统一刷新 ---------------- */
   async function refresh(manual) {
     try {
-      if (state.admin) await refreshAdmin();
-      else             await refreshStudent();
+      /* 卡面在学生端总是刷新；管理端用下拉框替代 */
+      if (!state.admin) await refreshStudent();
+      else              await refreshAdminView();
       if (manual) ok('已刷新');
     } catch (ex) {
       if (/卡号或密码错误|缺少身份/.test(ex.message)) {
@@ -84,7 +120,7 @@
     }
   }
 
-  /* ---------------- 学生视图 ---------------- */
+  /* ---------------- 学生端 ---------------- */
   function paintCard(k) {
     state.card = k;
     $('#cvId').textContent = k.id;
@@ -93,12 +129,16 @@
     $('#cvRemain').textContent = money(k.remain);
     $('#cvRecharge').textContent = money(k.recharge);
     $('#cvStatus').textContent = k.stateText;
-    /* 冻结或挂失时禁用上机按钮，并给出原因 */
+    /* 非正常状态禁用消费与上机 */
     const blocked = k.state !== 0;
     $('#machineIdle').classList.toggle('hidden', k.online === 1);
     $('#machineBusy').classList.toggle('hidden', k.online !== 1);
     $('#btnOnline').disabled = blocked;
     $('#btnOnline').textContent = blocked ? `当前状态：${k.stateText}` : '上机登记';
+    $('#btnPay').disabled = blocked;
+    $('#payTip').textContent = `单笔限额 ${k.limitOnce > 0 ? money(k.limitOnce) + ' 元' : '不限'}` +
+      ` · 日累计 ${k.limitDay > 0 ? money(k.limitDay) + ' 元' : '不限'}` +
+      ` · 今日已消费 ${money(k.usedDay)} 元`;
     if (k.online === 1) startTimer(k.startTime); else stopTimer();
   }
 
@@ -108,7 +148,59 @@
     paintCard(c.card);
     $('#rateTip').textContent = money(c.rate) + ' 元 / 小时';
 
-    const st = await API.stats(state.period);
+    if (state.view === 'student-consume') {
+      await loadMerchants();
+    } else if (state.view === 'student-ledger') {
+      await paintLedger($('#tblLedger tbody'), state.period.ledger, false);
+    } else if (state.view === 'student-stats') {
+      await paintConsumeStats();
+      await paintMachineStats();
+    } else if (state.view === 'student-access') {
+      await paintAccess();
+    }
+  }
+
+  /* 消费点下拉（学生端与管理端共用一次请求） */
+  let merchantList = null;
+  async function loadMerchants() {
+    if (!merchantList) merchantList = (await API.merchants()).merchants;
+    const fill = (sel, exclude) => {
+      if (!sel || sel.options.length) return;
+      sel.innerHTML = merchantList
+        .filter((m) => !exclude || m !== exclude)
+        .map((m) => `<option>${esc(m)}</option>`).join('');
+    };
+    fill($('#selMerchant'), '机房');            /* 机房走独立的上机面板 */
+    fill($('#selPosMerchant'), null);
+  }
+
+  /* 交易流水渲染。admin 为真时显示卡号列 */
+  async function paintLedger(tbody, period, admin) {
+    if (!tbody) return;
+    const r = admin ? await API.admLedger(period) : await API.ledger(period);
+    const rows = (r.records || []).slice().reverse();
+    tbody.innerHTML = rows.length
+      ? rows.map((t) => `<tr>
+          <td>${esc(t.time)}</td>
+          ${admin ? `<td>${esc(t.id)}</td>` : ''}
+          <td>${esc(t.typeText)}</td><td>${esc(t.merchant)}</td>
+          <td class="num">${money(t.amount)}</td>
+          <td class="num">${money(t.balance)}</td></tr>`).join('')
+      : emptyRow(admin ? 6 : 5, '该时段暂无交易');
+    return r.total;
+  }
+
+  async function paintConsumeStats() {
+    const st = await API.consume(state.period.consume);
+    $('#csCount').textContent = st.count;
+    $('#csAmount').textContent = money(st.amount);
+    const k = state.card || {};
+    $('#csToday').textContent = money(k.usedDay);
+    $('#csLimit').textContent = k.limitDay > 0 ? money(k.limitDay) : '不限';
+  }
+
+  async function paintMachineStats() {
+    const st = await API.stats(state.period.stats);
     $('#stCount').textContent = st.count;
     $('#stMinutes').textContent = st.minutes;
     $('#stCost').textContent = money(st.cost);
@@ -124,7 +216,17 @@
       : emptyRow(6, '暂无上机记录');
   }
 
-  /* 上机计时：以服务端开始时间为准本地走字，实时预估费用 */
+  async function paintAccess() {
+    const r = await API.accessLog();
+    const rows = (r.records || []).slice().reverse();
+    $('#tblAccess tbody').innerHTML = rows.length
+      ? rows.map((a) => `<tr>
+          <td>${esc(a.time)}</td><td>${esc(a.dirText)}</td>
+          <td>${esc(a.kindText)}</td><td>${esc(a.place)}</td></tr>`).join('')
+      : emptyRow(4, '暂无刷卡记录');
+  }
+
+  /* ---------------- 上机计时 ---------------- */
   function startTimer(startTime) {
     stopTimer();
     const t0 = new Date(startTime.replace(/-/g, '/')).getTime();
@@ -135,8 +237,9 @@
       const ss = String(sec % 60).padStart(2, '0');
       const est = sec / 3600 * state.rate;
       $('#mTime').textContent = `${hh}:${mm}:${ss}`;
+      const where = state.card ? state.card.address : '';
       $('#mWhere').innerHTML =
-        `${esc(state.card ? state.card.address : '')} · 预估 <b id="mCost">${money(est)}</b> 元`;
+        `${esc(where)} · 预估 <b id="mCost">${money(est)}</b> 元`;
     };
     tick();
     state.timer = setInterval(tick, 1000);
@@ -149,15 +252,42 @@
     if (box) box.textContent = '0.00';
   }
 
-  /* 统计时间段切换 */
-  $$('#segPeriod button').forEach((b) => {
-    b.onclick = () => {
-      $$('#segPeriod button').forEach((x) => x.classList.remove('on'));
-      b.classList.add('on');
-      state.period = b.dataset.p;
+  /* ---------------- 时间段切换 ---------------- */
+  const bindSeg = (sel, key) => {
+    $$(sel + ' button').forEach((b) => {
+      b.onclick = () => {
+        $$(sel + ' button').forEach((x) => x.classList.remove('on'));
+        b.classList.add('on');
+        state.period[key] = b.dataset.p;
+        refresh();
+      };
+    });
+  };
+  bindSeg('#segPeriod', 'stats');
+  bindSeg('#segLedger', 'ledger');
+  bindSeg('#segConsume', 'consume');
+
+  /* ---------------- 学生操作 ---------------- */
+  $('#btnPay').onclick = async () => {
+    const merchant = $('#selMerchant').value;
+    const amount = Number($('#inPayAmount').value);
+    if (!(amount > 0)) return err('请输入消费金额');
+    const v = await prompt({
+      title: `消费确认 · ${merchant}`,
+      fields: [{ name: 'payPwd', label: `交易密码（消费 ${money(amount)} 元）`,
+                 type: 'password', placeholder: '学号后 6 位' }],
+      confirmLabel: '确认扣款'
+    });
+    if (!v) return;
+    try {
+      const r = await API.pay(merchant, amount, v.payPwd);
+      API.setPayPwd(v.payPwd);                   /* 记住，下次免输 */
+      ok(`消费成功，余额 ${money(r.card.remain)} 元`);
+      $('#inPayAmount').value = '';
+      paintCard(r.card);
       refreshStudent();
-    };
-  });
+    } catch (ex) { err(ex.message); }
+  };
 
   $('#btnOnline').onclick = async () => {
     const place = $('#selPlace').value;
@@ -177,89 +307,143 @@
     } catch (ex) { err(ex.message); }
   };
 
-  $('#tilePwd').onclick = async () => {
-    const v = await prompt({
-      title: '修改登录密码',
-      fields: [{ name: 'newPwd', label: '新密码', type: 'password', placeholder: '至少 6 位' }],
-      confirmLabel: '修改'
-    });
-    if (!v) return;
+  $$('[data-access-dir]').forEach((btn) => {
+    btn.onclick = async () => {
+      const place = $('#selAccessPlace').value;
+      const kind = Number($('#selAccessKind').value);
+      const dir = Number(btn.dataset.accessDir);
+      try {
+        const r = await API.access(place, dir, kind);
+        ok(r.message);
+        paintAccess();
+      } catch (ex) { err(ex.message); }
+    };
+  });
+
+  /* ---------------- 管理员：商户终端 ---------------- */
+  /* 模拟 POS：管理员选持卡人 + 消费点 + 金额，由持卡人输入交易密码确认 */
+  $('#btnPosPay').onclick = async () => {
+    const id = $('#selPosCard').value;
+    const merchant = $('#selPosMerchant').value;
+    const amount = Number($('#inPosAmount').value);
+    const payPwd = $('#inPosPayPwd').value;
+    if (!id) return err('请选择持卡人');
+    if (!(amount > 0)) return err('请输入消费金额');
+    if (!payPwd) return err('请输入交易密码');
+
+    const btn = $('#btnPosPay');
+    btn.disabled = true;
     try {
-      ok((await API.changePwd(v.newPwd)).message);
-      API.setAuth(API.token, v.newPwd);     /* 同步本地保存的密码 */
+      const r = await API.adminOp('pay', { id, merchant, amount, payPwd });
+      ok(`扣款成功，余额 ${money(r.card.remain)} 元`);
+      $('#inPosAmount').value = '';
+      $('#inPosPayPwd').value = '';
+      refreshAdminView();
     } catch (ex) { err(ex.message); }
+    finally { btn.disabled = false; }
   };
 
-  $('#tileLost').onclick = () => {
-    const k = state.card || {};
-    UI.openModal({
-      title: '挂失确认',
-      bodyHTML: `<p>挂失后该卡不能上机，需管理员重置密码才能解除冻结。</p>
-        ${k.online === 1 ? '<p class="muted">该卡正在上机，挂失将先按下机结账。</p>' : ''}`,
-      actions: [
-        { label: '取消' },
-        {
-          label: '确认挂失', kind: 'danger',
-          onClick: async () => {
-            try {
-              const r = await API.selfLoss();
-              ok(r.message);
-              paintCard(r.card);
-              refreshStudent();
-            } catch (ex) { err(ex.message); }
-          }
-        }
-      ]
-    });
-  };
-
-  /* ---------------- 管理员视图 ---------------- */
-  async function refreshAdmin() {
-    const inc = await API.income();
-    $('#incDay').textContent = inc.day;
-    $('#incFee').textContent = money(inc.feeIncome);
-    $('#incTimes').textContent = inc.times;
-
+  /* ---------------- 管理员：视图刷新 ---------------- */
+  async function refreshAdminView() {
+    await loadMerchants();
     const c = await API.cards();
-    $('#incRemain').textContent = money(c.remainTotal);
-    $('#incRecharge').textContent = money(c.rechargeTotal);
-    $('#cardSummary').textContent = `${c.total} 张卡 · 上机中 ${c.onlineCount} 人`;
+    /* 卡片下拉（卡务中心 + 商户终端） */
+    const fillCards = (sel, keep) => {
+      if (!sel) return;
+      sel.innerHTML = c.cards.map((k) =>
+        `<option value="${esc(k.id)}">${esc(k.id)} · ${esc(k.name)} · ${money(k.remain)} 元</option>`).join('');
+      if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+    };
+    fillCards($('#selCard'), $('#selCard').value);
+    fillCards($('#selPosCard'), $('#selPosCard').value);
 
-    $('#tblCards tbody').innerHTML = c.cards.map((k) => `<tr>
-        <td>${esc(k.id)}</td><td>${esc(k.name)}</td><td>${esc(k.number)}</td>
-        <td class="num">${money(k.recharge)}</td>
-        <td class="num">${money(k.remain)}</td>
-        <td>${esc(k.stateText)}</td>
-        <td>${k.online === 1 ? esc(k.address) : '未上机'}</td></tr>`).join('');
+    if (state.view === 'admin-card') {
+      $('#cardSummary').textContent = `${c.total} 张卡 · 上机中 ${c.onlineCount} 人`;
+      $('#tblCards tbody').innerHTML = c.cards.map((k) => `<tr>
+          <td>${esc(k.id)}</td><td>${esc(k.name)}</td><td>${esc(k.number)}</td>
+          <td class="num">${money(k.remain)}</td>
+          <td class="num">${money(k.usedDay)}</td>
+          <td>${esc(k.stateText)}</td>
+          <td>${esc(k.expire || '长期')}</td></tr>`).join('');
+    } else if (state.view === 'admin-report') {
+      const r = await API.report();
+      $('#incDay').textContent = r.day;
+      $('#incConsume').textContent = money(r.consumeTotal);
+      $('#incTimes').textContent = r.consumeTimes;
+      $('#incRecharge').textContent = money(r.rechargeTotal);
+      $('#incFee').textContent = money(r.feeIncome);
+      $('#tblMerchantSum tbody').innerHTML = (r.merchants || []).map((m) => `<tr>
+          <td>${esc(m.name)}</td><td class="num">${money(m.amount)}</td></tr>`).join('');
 
-    const sel = $('#selCard');
-    const keep = sel.value;
-    sel.innerHTML = c.cards.map((k) =>
-      `<option value="${esc(k.id)}">${esc(k.id)} · ${esc(k.name)} · ${money(k.remain)} 元</option>`).join('');
-    if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+      const L = await API.admLedger('day');
+      $('#ledgerCount').textContent = `共 ${L.total} 条`;
+      $('#tblAdmLedgerAll tbody').innerHTML = (L.records || []).length
+        ? L.records.slice().reverse().map((t) => `<tr>
+            <td>${esc(t.time)}</td><td>${esc(t.id)}</td><td>${esc(t.typeText)}</td>
+            <td>${esc(t.merchant)}</td>
+            <td class="num">${money(t.amount)}</td>
+            <td class="num">${money(t.balance)}</td></tr>`).join('')
+        : emptyRow(6, '当天暂无交易');
+
+      const A = await API.admAccess('');
+      $('#accessCount').textContent = `共 ${A.total} 条`;
+      $('#tblAccessAll tbody').innerHTML = (A.records || []).length
+        ? A.records.slice().reverse().map((a) => `<tr>
+            <td>${esc(a.id)}</td><td>${esc(a.time)}</td><td>${esc(a.dirText)}</td>
+            <td>${esc(a.kindText)}</td><td>${esc(a.place)}</td></tr>`).join('')
+        : emptyRow(5, '暂无门禁记录');
+    }
   }
 
+  /* ---------------- 管理员：卡务操作 ---------------- */
   $$('[data-op]').forEach((btn) => {
     btn.onclick = async () => {
       const op = btn.dataset.op;
       const id = $('#selCard').value;
-      const body = { id };
+      const amount = Number($('#opAmount').value);
       if (!id) return err('请先选择卡号');
-      if (op === 'recharge') {
-        const amount = Number($('#opAmount').value);
-        if (!(amount > 0)) return err('请输入充值金额');
-        body.amount = amount;
-      } else if (op === 'reset') {
-        if (!confirm(`确认把 ${id} 的密码重置为 123456 并解除冻结？`)) return;
+      const body = { id };
+      const needAmount = ['recharge', 'reissue', 'grant'];
+      if (needAmount.includes(op)) {
+        if (!(amount > 0)) return err('请在「金额」框填写金额');
+        if (op === 'recharge') body.amount = amount;
+        if (op === 'reissue')  body.fee = amount;
+        if (op === 'grant')  { body.amount = amount; body.type = 4; body.memo = '补助发放'; }
       }
+      if (op === 'limits') {
+        const v = await prompt({
+          title: '设置消费限额',
+          fields: [
+            { name: 'limitOnce', label: '单笔限额（元，0 表示不限）', placeholder: '20' },
+            { name: 'limitDay',  label: '日累计限额（元，0 表示不限）', placeholder: '50' }
+          ],
+          confirmLabel: '保存'
+        });
+        if (!v) return;
+        body.limitOnce = Number(v.limitOnce) || 0;
+        body.limitDay  = Number(v.limitDay) || 0;
+      }
+      if (op === 'expire') {
+        const v = await prompt({
+          title: '卡片延期',
+          fields: [{ name: 'date', label: '新的有效期（YYYY-MM-DD）', placeholder: '2030-06-30' }],
+          confirmLabel: '保存'
+        });
+        if (!v) return;
+        body.date = v.date;
+      }
+      if (op === 'unfreeze') { body.on = 0; }
+      if (op === 'freeze')   { body.on = 1; }
+      /* 服务端路径名与按钮 data-op 的映射 */
+      const PATH = { unfreeze: 'freeze', reissue: 'reissue' };
+      const apiOp = PATH[op] || op;
+
       btn.disabled = true;
       try {
-        const r = await API.adminOp(op, body);
-        ok(op === 'recharge'
-          ? `充值成功，余额 ${money(r.card.remain)} 元`
-          : `操作成功，当前状态：${r.card.stateText}`);
+        const r = await API.adminOp(apiOp, body);
+        ok(`操作成功，余额 ${money(r.card.remain)} 元，状态 ${r.card.stateText}`);
         $('#opAmount').value = '';
-        refreshAdmin();
+        refreshAdminView();
       } catch (ex) { err(ex.message); }
       finally { btn.disabled = false; }
     };
@@ -270,8 +454,7 @@
     if (!id) return err('请先选择卡号');
     try {
       const r = await API.admRecords(id);
-      $('#admRecTitle').textContent = `${id} 共 ${r.total} 条`;
-      $('#tblAdmRecords tbody').innerHTML = r.records.length
+      $('#tblAdmRecords tbody').innerHTML = (r.records || []).length
         ? r.records.slice().reverse().map((x) => `<tr>
             <td>${esc(x.id)}</td><td>${esc(x.date)}</td><td>${esc(x.startTime)}</td>
             <td class="num">${x.duration}</td><td class="num">${money(x.cost)}</td>
@@ -280,7 +463,23 @@
     } catch (ex) { err(ex.message); }
   };
 
-  /* ---------------- 启动：校验服务并恢复身份 ---------------- */
+  $('#btnViewLedger').onclick = async () => {
+    const id = $('#selCard').value;
+    if (!id) return err('请先选择卡号');
+    try {
+      const r = await API.admLedger('day');
+      const rows = (r.records || []).filter((t) => t.id === id).reverse();
+      $('#tblAdmLedger tbody').innerHTML = rows.length
+        ? rows.map((t) => `<tr>
+            <td>${esc(t.time)}</td><td>${esc(t.id)}</td><td>${esc(t.typeText)}</td>
+            <td>${esc(t.merchant)}</td>
+            <td class="num">${money(t.amount)}</td>
+            <td class="num">${money(t.balance)}</td></tr>`).join('')
+        : emptyRow(6, '该卡当天暂无交易');
+    } catch (ex) { err(ex.message); }
+  };
+
+  /* ---------------- 启动：探活并恢复身份 ---------------- */
   (async () => {
     try { await API.health(); }
     catch (e) {
@@ -293,27 +492,25 @@
       const admin = API.token === 'ADMIN';
       if (admin) { state.admin = true; state.card = null; }
       else {
-        const c = await API.card();       /* 用本地身份试读一次卡片 */
+        const c = await API.card();
         state.card = c.card;
       }
       enterApp();
-      handleShortcut();                   /* 从桌面快捷方式进入时直达对应功能 */
+      handleShortcut();
     } catch (e) { API.setAuth('', ''); }
   })();
 
-  /* 处理 PWA 快捷方式深链：/?action=online 或 /?action=stats */
+  /* PWA 快捷方式深链：/?action=online 或 /?action=stats */
   function handleShortcut() {
     const action = new URLSearchParams(location.search).get('action');
     if (!action || state.admin) return;
-    /* 清掉查询串，避免刷新后重复触发 */
     history.replaceState(null, '', location.pathname);
     if (action === 'online') {
       if (state.card && state.card.online === 1) { ok('当前已在上机中'); return; }
-      const el = $('#machineIdle');
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      $('#selPlace')?.focus();
+      switchView('student-consume');
+      $('#btnOnline')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } else if (action === 'stats') {
-      $('#segPeriod')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      switchView('student-stats');
     }
   }
 
