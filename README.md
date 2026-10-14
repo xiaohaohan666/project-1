@@ -1,16 +1,61 @@
 # 模拟校园卡 —— 机房上机计费与消费记录查询系统
 
 按《模拟校园卡》（出题人：俞琼，面向专业：物联网工程）要求实现的 C 语言程序，
-提供**命令行版**与**网页版**两种界面，两版共用同一套业务规则与数据文件。
+提供**命令行版**与**可安装的多端应用（PWA）**两种界面，两者共用同一套业务规则与数据文件。
 
 ```
 main.c              命令行版：登录、学生端、管理员端、主函数
 src/campus.h/.c     业务核心：卡片读写、上机计费、挂失、统计
-src/server.c        HTTP/JSON 服务（纯 C，跨 Windows / Linux，无第三方依赖）
-web/                网页前端（原生 HTML/CSS/JS，零构建）
-Dockerfile          容器镜像定义
-.github/workflows/  CI：Linux + Windows 双平台编译与接口冒烟测试
+src/server.c        HTTP/JSON 服务兼静态托管（纯 C，跨 Windows / Linux，无第三方依赖）
+web/                前端应用（原生 HTML/CSS/JS，零构建、零依赖）
+  index.html          页面结构
+  css/app.css         样式（CSS 变量 + 响应式 + 独立窗口适配）
+  js/api.js           网络层：统一请求与身份携带
+  js/ui.js            部件层：提示条 / 弹窗 / 输入弹窗 / 转义
+  js/app.js           业务层：状态、渲染、交互、上机计时
+  js/pwa.js           PWA 装配：Service Worker、安装引导、离线提示
+  sw.js               Service Worker：外壳缓存 + 接口不缓存
+  manifest.webmanifest 应用清单（可安装、独立窗口、桌面快捷方式）
+  icons/              应用图标（PNG，由 tools/make_icons.py 生成）
+tools/              图标生成与各项自动化检查脚本
+deploy/             公网隧道脚本与验收脚本
+Dockerfile          容器镜像定义（适配 Render / Railway / Fly.io）
+render.yaml         Render 部署蓝图
+.github/workflows/  CI：Linux + Windows 双平台编译与接口冒烟测试；keepalive 探活
 data/               数据目录（卡片、上机记录、收入流水）
+```
+
+## 零、作为应用程序使用（PWA）
+
+网页版同时也是**可安装的应用程序**：浏览器打开后即可"安装到本机"，
+安装后以独立窗口运行、有独立图标、断网也能打开界面。
+
+| 平台 | 安装方式 |
+|---|---|
+| Windows / macOS / Linux（Chrome、Edge） | 地址栏右侧的安装图标，或"安装应用"按钮 |
+| Android（Chrome） | 菜单 →「安装应用」/「添加到主屏幕」 |
+| iOS / iPadOS（Safari） | 分享 →「添加到主屏幕」（系统限制，无自动安装） |
+
+技术要点：
+
+- **Service Worker**（`sw.js`）两条策略——应用外壳 `stale-while-revalidate`
+  （命中缓存秒开，同时后台更新）；`/api/` 请求严格 `network-only`
+  （余额与计费必须实时，绝不缓存），离线时返回结构化错误
+- **应用清单**（`manifest.webmanifest`）声明 `standalone` 显示模式、
+  主题色、192/512 图标、`maskable` 自适应图标与两个桌面快捷方式
+- **多端适配**：响应式断点（900px 单栏、640px 统计块折半）、
+  刘海屏安全区 `env(safe-area-inset-*)`、动态视口高度 `100dvh`、
+  触屏目标尺寸与防 iOS 聚焦缩放、系统"减少动态效果"适配
+- **离线提示**：`offline-bar` 状态条 + 卡面降饱和，明确告知数据可能不是最新
+
+> Service Worker 需要**安全上下文**：`https://` 或 `localhost`。
+> 通过 `file://` 打开或用局域网 IP 的 `http://` 访问时不会注册 SW
+> （界面仍可用，只是没有离线能力与安装能力）。
+
+图标重新生成：
+
+```bash
+python tools/make_icons.py     # 纯标准库手写 PNG 编码，无需 Pillow
 ```
 
 ## 一、题目要求与实现对应
