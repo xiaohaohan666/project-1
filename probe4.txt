@@ -1,0 +1,13 @@
+﻿probe #3  completed/failure
+  https://github.com/xiaohaohan666/project-1/actions/runs/38496983202
+作业: probe -> failure
+   [success ] 1. Set up job
+   [success ] 2. Run actions/checkout@v4
+   [success ] 3. Run gcc --version | head -1
+   [failure ] 4. A. 整体编译 server.c
+   [skipped ] 5. B. 仅编译不链接 (-c)
+   [skipped ] 6. C. 单独编译 campus.c
+   [skipped ] 7. D. 预处理统计平台分支
+   [skipped ] 8. E. 强制走 POSIX 分支编译
+   [success ] 16. Post Run actions/checkout@v4
+   [success ] 17. Complete job
