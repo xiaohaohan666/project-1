@@ -1,3 +1,0 @@
-﻿probe #2  completed/success
-  https://github.com/xiaohaohan666/project-1/actions/runs/38496859005
-作业: probe -> success | id = 115634500448
