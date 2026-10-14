@@ -12,6 +12,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef _WIN32
+#  include <direct.h>            /* _mkdir：Windows 下创建目录 */
+#else
+#  include <sys/stat.h>          /* mkdir：Linux 下创建目录    */
+#  include <sys/types.h>
+#endif
 #include "campus.h"
 
 /* ---------------- 全局状态 ---------------- */
@@ -144,7 +150,19 @@ static void seed_cards(void) {
     campus_save();
 }
 
-/* 初始化。data_dir 数据目录。成功返回 1 */
+/* 确保数据目录存在，不存在则创建一层（跨平台）。
+ * dir 目录名。目录已存在或创建成功返回 1 */
+static int ensure_dir(const char *dir) {
+    if (!dir || !*dir) return 1;                /* 空表示当前目录，必然存在 */
+#ifdef _WIN32
+    if (_mkdir(dir) == 0) return 1;             /* Windows：_mkdir 只接一个参数 */
+#else
+    if (mkdir(dir, 0755) == 0) return 1;        /* Linux：权限 0755            */
+#endif
+    return 0;                                   /* 失败通常是已存在，交给上层判断 */
+}
+
+/* 初始化。data_dir 数据目录（不存在会自动创建）。成功返回 1 */
 int campus_init(const char *data_dir) {
     size_t n;
     memset(g_cards, 0, sizeof(g_cards));
@@ -156,6 +174,7 @@ int campus_init(const char *data_dir) {
     n = strlen(g_dir);
     while (n > 1 && (g_dir[n - 1] == '/' || g_dir[n - 1] == '\\')) g_dir[--n] = '\0';
 
+    ensure_dir(g_dir);                          /* 首次运行自动建立数据目录 */
     if (campus_load() == 0) seed_cards();       /* 无数据则建立演示卡片 */
     return 1;
 }
