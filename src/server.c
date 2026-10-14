@@ -516,6 +516,20 @@ static void serve_static(sock_t fd, const char *path) {
     free(buf);
 }
 
+/* 长度受限的大小写不敏感比较（不依赖平台专有函数，Windows/Linux 通用）。
+ * a、b 待比较字符串；n 最多比较的字符数。
+ * 相等返回 0，否则返回非 0 */
+static int ci_ncmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;       /* 统一转小写比较 */
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return ca - cb;
+        if (!ca) break;
+    }
+    return 0;
+}
+
 /* 取请求头字段值（头名不区分大小写）。
  * req 完整请求报文；name 头名；out 输出；osz 缓冲大小。找到返回 1 */
 static int header_value(const char *req, const char *name, char *out, int osz) {
@@ -527,7 +541,7 @@ static int header_value(const char *req, const char *name, char *out, int osz) {
         const char *eol = strstr(p, "\r\n");
         size_t len = eol ? (size_t)(eol - p) : strlen(p);
         if (len == 0) break;                        /* 空行：请求头结束 */
-        if (len > nlen && !_strnicmp(p, name, (int)nlen) && p[nlen] == ':') {
+        if (len > nlen && !ci_ncmp(p, name, nlen) && p[nlen] == ':') {
             const char *v = p + nlen + 1;
             while (*v == ' ' || *v == '\t') v++;
             int i = 0;
