@@ -38,6 +38,7 @@ static char g_income_day[INCOME_MAX][12];   /* 收入流水：日期（兼容旧
 static double g_income_amt[INCOME_MAX];     /* 收入流水：金额（元）   */
 static int  g_n_income;                     /* 收入流水条数           */
 static long g_seq;                          /* 交易流水号自增计数     */
+static int  g_card_truncated;               /* 载入时是否因超上限而丢卡 */
 static char g_dir[200];                     /* 数据目录               */
 
 /* ---------------- 内部工具 ---------------- */
@@ -205,8 +206,50 @@ int campus_save(void) {
     return 1;
 }
 
+/* 按 | 切分一行，取第 idx 个字段（从 0 开始）写入 out。
+ * 空字段会得到空串。
+ * 注意：不能直接用 sscanf 的 %[^|]——它遇到空字段（两个连续 |）会失败并
+ * 中止整个解析，导致后续字段全部读不到（曾造成卡号被错读为交易密码）。 */
+static void field_at(const char *line, int idx, char *out, int osz) {
+    const char *p = line;
+    int i = 0;
+    out[0] = '\0';
+    while (p) {
+        const char *bar = strchr(p, '|');
+        size_t len = bar ? (size_t)(bar - p) : strlen(p);
+        if (i == idx) {
+            /* 末字段去掉行尾换行 */
+            while (len > 0 && (p[len - 1] == '\n' || p[len - 1] == '\r')) len--;
+            if (len >= (size_t)osz) len = (size_t)osz - 1;
+            memcpy(out, p, len);
+            out[len] = '\0';
+            return;
+        }
+        if (!bar) break;
+        p = bar + 1;
+        i++;
+    }
+}
+
+/* 解析整数的辅助：空字段返回默认值 */
+static int field_int(const char *line, int idx, int dflt) {
+    char buf[24];
+    field_at(line, idx, buf, sizeof(buf));
+    return buf[0] ? atoi(buf) : dflt;
+}
+static double field_num(const char *line, int idx, double dflt) {
+    char buf[24];
+    field_at(line, idx, buf, sizeof(buf));
+    return buf[0] ? atof(buf) : dflt;
+}
+
 /* 读取 cards.dat 与 income.dat。返回读到的卡片数。
- * 兼容两种行格式：旧版 10 字段（无交易密码与限额）与新版 16 字段 */
+ * 字段下标与写入格式严格对应（0 基）：
+ *   0 卡号  1 姓名  2 学号  3 登录密码  4 交易密码  5 累计充值  6 余额
+ *   7 状态  8 是否上机  9 开始时间  10 地点  11 日限额  12 今日已用
+ *   13 今日日期  14 单笔限额  15 有效期
+ * 采用逐字段取值而非 sscanf，因此空字段（如上机中的开始时间与地点）
+ * 不会影响后续字段；不足 12 个字段的旧版数据自动补默认值 */
 static int campus_load(void) {
     char line[320];
     FILE *fp = fopen(path_of("cards.dat"), "r");
@@ -214,34 +257,48 @@ static int campus_load(void) {
     if (fp) {
         while (g_n_card < CARD_MAX && fgets(line, sizeof(line), fp)) {
             Card k;
-            int n;
+            char ext[24];
             memset(&k, 0, sizeof(k));
-            k.limit_once = 0;
-            k.limit_day  = 0;
 
-            /* 先按新版 16 字段解析 */
-            n = sscanf(line,
-                       "%9[^|]|%11[^|]|%11[^|]|%19[^|]|%19[^|]|%lf|%lf|%d|%d|%19[^|]|%23[^|]|%lf|%lf|%11[^|]|%lf|%11[^\n]",
-                       k.id, k.name, k.number, k.pwd, k.pay_pwd,
-                       &k.recharge, &k.remain, &k.state, &k.online,
-                       k.start_time, k.address, &k.limit_day, &k.used_day,
-                       k.used_date, &k.limit_once, k.expire);
-            if (n < 16) {
-                /* 回退到旧版 10 字段格式，并补默认交易密码与限额 */
-                memset(&k, 0, sizeof(k));
-                n = sscanf(line,
-                           "%9[^|]|%11[^|]|%11[^|]|%19[^|]|%lf|%lf|%d|%d|%19[^|]|%23[^\n]",
-                           k.id, k.name, k.number, k.pwd, &k.recharge, &k.remain,
-                           &k.state, &k.online, k.start_time, k.address);
-                if (n < 7) continue;
-                snprintf(k.pay_pwd, sizeof(k.pay_pwd), "%s", DEFAULT_PWD);
-                k.limit_day = 50.0;     /* 旧数据给一个合理的默认日限额 */
+            /* 先取卡号：为空说明是空行，跳过 */
+            field_at(line, 0, k.id, sizeof(k.id));
+            if (!k.id[0]) continue;
+
+            field_at(line, 1, k.name, sizeof(k.name));
+            field_at(line, 2, k.number, sizeof(k.number));
+            field_at(line, 3, k.pwd, sizeof(k.pwd));
+            field_at(line, 4, k.pay_pwd, sizeof(k.pay_pwd));
+            k.recharge = field_num(line, 5, 0);
+            k.remain   = field_num(line, 6, 0);
+            k.state    = field_int(line, 7, ST_NORMAL);
+            k.online   = field_int(line, 8, ONLINE_NO);
+            field_at(line, 9, k.start_time, sizeof(k.start_time));
+            field_at(line, 10, k.address, sizeof(k.address));
+
+            /* 第 11 字段起为扩展字段；旧版数据到第 10 字段为止 */
+            field_at(line, 11, ext, sizeof(ext));
+            if (ext[0]) {
+                k.limit_day  = atof(ext);
+                k.used_day   = field_num(line, 12, 0);
+                field_at(line, 13, k.used_date, sizeof(k.used_date));
+                k.limit_once = field_num(line, 14, 0);
+                field_at(line, 15, k.expire, sizeof(k.expire));
+            } else {
+                /* 旧版数据：补默认交易密码与限额 */
+                k.limit_day  = 50.0;        /* 合理的默认日限额 */
                 k.limit_once = 20.0;
             }
-            if (!k.pay_pwd[0]) snprintf(k.pay_pwd, sizeof(k.pay_pwd), "%s", DEFAULT_PWD);
-            if (!k.used_date[0]) now_fmt(k.used_date, sizeof(k.used_date), "%Y-%m-%d");
+
+            if (!k.pay_pwd[0])
+                snprintf(k.pay_pwd, sizeof(k.pay_pwd), "%s", DEFAULT_PWD);
+            if (!k.used_date[0])
+                now_fmt(k.used_date, sizeof(k.used_date), "%Y-%m-%d");
+            if (k.state < 0 || k.state > ST_EXPIRED) k.state = ST_NORMAL;
             g_cards[g_n_card++] = k;
         }
+        /* 若读满上限后文件仍有内容，说明有卡片被丢弃，置位以便上层告警 */
+        if (g_n_card >= CARD_MAX && fgets(line, sizeof(line), fp) && line[0])
+            g_card_truncated = 1;
         fclose(fp);
     }
 
@@ -289,6 +346,7 @@ int campus_init(const char *data_dir) {
     memset(g_income_amt, 0, sizeof(g_income_amt));
     g_n_card = g_n_income = 0;
     g_seq = 0;
+    g_card_truncated = 0;
 
     snprintf(g_dir, sizeof(g_dir), "%s", data_dir ? data_dir : "");
     n = strlen(g_dir);
@@ -301,6 +359,8 @@ int campus_init(const char *data_dir) {
 
 /* ---------------- 查询 ---------------- */
 int campus_count(void) { return g_n_card; }
+int campus_card_truncated(void) { return g_card_truncated; }
+int campus_card_max(void) { return CARD_MAX; }
 
 Card *campus_at(int i) {
     return (i >= 0 && i < g_n_card) ? &g_cards[i] : NULL;
@@ -351,10 +411,14 @@ int campus_load_records(const char *id, Record *out, int max) {
     while (n < max && fgets(line, sizeof(line), fp)) {
         Record r;
         memset(&r, 0, sizeof(r));
-        if (sscanf(line, "%9[^|]|%11[^|]|%9[^|]|%d|%lf|%11[^|]|%23[^\n]",
-                   r.id, r.date, r.start_time, &r.duration, &r.cost,
-                   r.state, r.address) < 7)
-            continue;
+        field_at(line, 0, r.id, sizeof(r.id));
+        if (!r.id[0]) continue;
+        field_at(line, 1, r.date, sizeof(r.date));
+        field_at(line, 2, r.start_time, sizeof(r.start_time));
+        r.duration = field_int(line, 3, 0);
+        r.cost     = field_num(line, 4, 0);
+        field_at(line, 5, r.state, sizeof(r.state));
+        field_at(line, 6, r.address, sizeof(r.address));
         out[n++] = r;
     }
     fclose(fp);
@@ -385,25 +449,35 @@ int campus_stats(const char *id, time_t from,
     return count;
 }
 
-/* 读取交易流水。id 为空表示全部卡；type 为 -1 表示全部类型；
- * from 为 0 表示不限时间。文件过大时只保留最近 max 条 */
-int campus_load_ledger(const char *id, int type, time_t from,
-                       Transaction *out, int max) {
+/* 内部：读取流水并可选跳过前 skip 条。paged 为 1 时按 skip 分页；
+ * 为 0 时采用环形保留最近 max 条。
+ * 返回值：读到的条数；out_truncated 回传是否发生截断 */
+static int ledger_read(const char *id, int type, time_t from,
+                       int skip, int paged,
+                       Transaction *out, int max, int *out_truncated) {
     char line[256];
     FILE *fp = fopen(path_of("ledger.dat"), "r");
-    int n = 0;
+    int n = 0, matched = 0, truncated = 0;
 
+    if (out_truncated) *out_truncated = 0;
     if (!fp) return 0;
     while (fgets(line, sizeof(line), fp)) {
         Transaction t;
-        int ty = 0;
+        char buf[24];
         memset(&t, 0, sizeof(t));
-        if (sscanf(line,
-                   "%ld|%19[^|]|%9[^|]|%d|%23[^|]|%lf|%lf|%15[^|]|%31[^\n]",
-                   &t.seq, t.time, t.id, &ty, t.merchant,
-                   &t.amount, &t.balance, t.device, t.memo) < 7)
-            continue;
-        t.type = ty;
+
+        field_at(line, 0, buf, sizeof(buf));
+        if (!buf[0]) continue;                      /* 空行跳过 */
+        t.seq = atol(buf);
+        field_at(line, 1, t.time, sizeof(t.time));
+        if (!t.time[0]) continue;
+        field_at(line, 2, t.id, sizeof(t.id));
+        t.type = field_int(line, 3, TX_CONSUME);
+        field_at(line, 4, t.merchant, sizeof(t.merchant));
+        t.amount  = field_num(line, 5, 0);
+        t.balance = field_num(line, 6, 0);
+        field_at(line, 7, t.device, sizeof(t.device));
+        field_at(line, 8, t.memo, sizeof(t.memo));
 
         /* 过滤条件 */
         if (id && *id && strcmp(t.id, id)) continue;
@@ -412,51 +486,149 @@ int campus_load_ledger(const char *id, int type, time_t from,
             time_t tt = parse_time(t.time);
             if (tt != (time_t)-1 && tt < from) continue;
         }
-        if (n < max) {
-            out[n++] = t;                       /* 未满：顺序写入 */
+        matched++;
+
+        if (paged) {
+            /* 分页模式：跳过前 skip 条，然后顺序取 max 条 */
+            if (matched <= skip) continue;
+            if (n < max) out[n++] = t;
+            else matched--;                         /* 之后的都不再需要 */
         } else {
-            /* 已满：整体前移一条，保留最近 max 条 */
-            memmove(&out[0], &out[1], sizeof(Transaction) * (size_t)(max - 1));
-            out[max - 1] = t;
+            /* 覆盖模式：保留最近 max 条 */
+            if (n < max) {
+                out[n++] = t;
+            } else {
+                memmove(&out[0], &out[1], sizeof(Transaction) * (size_t)(max - 1));
+                out[max - 1] = t;
+                truncated = 1;
+            }
         }
+        if (paged && n >= max) break;
     }
     fclose(fp);
+    if (out_truncated) *out_truncated = truncated;
     return n;
 }
 
+/* 读取交易流水（保留最近 max 条） */
+int campus_load_ledger(const char *id, int type, time_t from,
+                       Transaction *out, int max, int *out_truncated) {
+    return ledger_read(id, type, from, 0, 0, out, max, out_truncated);
+}
+
+/* 分页读取交易流水：跳过前 skip 条后顺序取 max 条 */
+int campus_load_ledger_page(const char *id, int type, time_t from,
+                            int skip, Transaction *out, int max) {
+    return ledger_read(id, type, from, skip, 1, out, max, NULL);
+}
+
+/* 只统计条数，便于前端知道总数并分页 */
+int campus_count_ledger(const char *id, int type, time_t from) {
+    char line[256];
+    FILE *fp = fopen(path_of("ledger.dat"), "r");
+    int cnt = 0;
+
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        char idbuf[10], timebuf[20], buf[24];
+        int t;
+        field_at(line, 0, buf, sizeof(buf));
+        if (!buf[0]) continue;
+        field_at(line, 1, timebuf, sizeof(timebuf));
+        if (!timebuf[0]) continue;
+        field_at(line, 2, idbuf, sizeof(idbuf));
+        t = field_int(line, 3, TX_CONSUME);
+
+        if (id && *id && strcmp(idbuf, id)) continue;
+        if (type >= 0 && t != type) continue;
+        if (from) {
+            time_t tt = parse_time(timebuf);
+            if (tt != (time_t)-1 && tt < from) continue;
+        }
+        cnt++;
+    }
+    fclose(fp);
+    return cnt;
+}
+
 /* 读取门禁记录。id 为空表示全部卡；同样只保留最近 max 条 */
-int campus_load_access(const char *id, AccessLog *out, int max) {
+int campus_load_access(const char *id, AccessLog *out, int max, int *out_truncated) {
     char line[192];
     FILE *fp = fopen(path_of("access.dat"), "r");
-    int n = 0;
+    int n = 0, truncated = 0;
 
+    if (out_truncated) *out_truncated = 0;
     if (!fp) return 0;
     while (fgets(line, sizeof(line), fp)) {
         AccessLog a;
         memset(&a, 0, sizeof(a));
-        if (sscanf(line, "%9[^|]|%19[^|]|%d|%23[^|]|%d",
-                   a.id, a.time, &a.dir, a.place, &a.kind) < 4)
-            continue;
+        field_at(line, 0, a.id, sizeof(a.id));
+        if (!a.id[0]) continue;
+        field_at(line, 1, a.time, sizeof(a.time));
+        a.dir   = field_int(line, 2, ACC_IN);
+        field_at(line, 3, a.place, sizeof(a.place));
+        a.kind  = field_int(line, 4, ACCESS_DOOR);
+
         if (id && *id && strcmp(a.id, id)) continue;
         if (n < max) {
             out[n++] = a;
         } else {
             memmove(&out[0], &out[1], sizeof(AccessLog) * (size_t)(max - 1));
             out[max - 1] = a;
+            truncated = 1;
         }
     }
     fclose(fp);
+    if (out_truncated) *out_truncated = truncated;
     return n;
 }
 
-/* 汇总某卡 [from, 现在] 的消费（只统计 TX_CONSUME） */
+/* 只统计门禁记录条数 */
+int campus_count_access(const char *id) {
+    char line[192];
+    FILE *fp = fopen(path_of("access.dat"), "r");
+    int cnt = 0;
+
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        char idbuf[10];
+        field_at(line, 0, idbuf, sizeof(idbuf));
+        if (!idbuf[0]) continue;
+        if (id && *id && strcmp(idbuf, id)) continue;
+        cnt++;
+    }
+    fclose(fp);
+    return cnt;
+}
+
+/* 汇总某卡 [from, 现在] 的消费（只统计 TX_CONSUME）。
+ * 顺序扫描边读边累加，不把流水读进数组——省掉 1MB 级缓冲 */
 int campus_sum_consume(const char *id, time_t from, double *out_total) {
-    static Transaction tx[LEDGER_MAX];
-    int n = campus_load_ledger(id, TX_CONSUME, from, tx, LEDGER_MAX);
+    char line[256], idbuf[10], timebuf[20], buf[24];
+    FILE *fp = fopen(path_of("ledger.dat"), "r");
+    int cnt = 0;
     double total = 0.0;
-    for (int i = 0; i < n; i++) total += tx[i].amount;
+
+    if (out_total) *out_total = 0.0;
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        field_at(line, 0, buf, sizeof(buf));
+        if (!buf[0]) continue;
+        field_at(line, 1, timebuf, sizeof(timebuf));
+        if (!timebuf[0]) continue;
+        field_at(line, 2, idbuf, sizeof(idbuf));
+        if (id && *id && strcmp(idbuf, id)) continue;
+        if (field_int(line, 3, TX_CONSUME) != TX_CONSUME) continue;
+        if (from) {
+            time_t tt = parse_time(timebuf);
+            if (tt != (time_t)-1 && tt < from) continue;
+        }
+        total += field_num(line, 5, 0);
+        cnt++;
+    }
+    fclose(fp);
     if (out_total) *out_total = round2(total);
-    return n;
+    return cnt;
 }
 
 /* ---------------- 登录与注册 ---------------- */
@@ -793,47 +965,56 @@ void campus_today_income(double *out_fee, int *out_times) {
     if (out_times) *out_times = times;
 }
 
-/* 当天全站汇总：消费总额、消费笔数、充值总额，以及各商户消费额 */
+/* 当天全站汇总：消费总额、消费笔数、充值总额，以及各商户消费额。
+ * 顺序扫描流水边读边累加——不把上万条流水读进数组，省掉 1MB 级缓冲 */
 void campus_today_report(double *out_consume, int *out_times,
                          double *out_recharge, double merchant_sum[]) {
-    static Transaction tx[LEDGER_MAX];
+    char line[256], timebuf[20], mname[24], buf[24];
     char today[12];
-    time_t from;
-    int n;
+    FILE *fp;
     double consume = 0.0, recharge = 0.0;
     int times = 0;
 
-    /* 以今天 00:00 为起点过滤流水 */
-    {
-        time_t now = time(NULL);
-        struct tm tm = *localtime(&now);
-        tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0; tm.tm_isdst = -1;
-        from = mktime(&tm);
-    }
     now_fmt(today, sizeof(today), "%Y-%m-%d");
-
     if (merchant_sum) {
         for (int i = 0; i < MERCHANT_MAX; i++) merchant_sum[i] = 0.0;
     }
 
-    n = campus_load_ledger(NULL, -1, from, tx, LEDGER_MAX);
-    for (int i = 0; i < n; i++) {
-        if (strncmp(tx[i].time, today, 10)) continue;      /* 双重保险 */
-        if (tx[i].type == TX_CONSUME) {
-            consume += tx[i].amount;
+    fp = fopen(path_of("ledger.dat"), "r");
+    if (!fp) {
+        if (out_consume)  *out_consume = 0.0;
+        if (out_times)    *out_times = 0;
+        if (out_recharge) *out_recharge = 0.0;
+        return;
+    }
+    while (fgets(line, sizeof(line), fp)) {
+        int type;
+        double amount;
+        field_at(line, 0, buf, sizeof(buf));
+        if (!buf[0]) continue;
+        field_at(line, 1, timebuf, sizeof(timebuf));
+        /* 只按日期前缀比较，避免逐条做日期解析 */
+        if (strncmp(timebuf, today, 10)) continue;
+        type   = field_int(line, 3, TX_CONSUME);
+        amount = field_num(line, 5, 0);
+
+        if (type == TX_CONSUME) {
+            consume += amount;
             times++;
             if (merchant_sum) {
+                field_at(line, 4, mname, sizeof(mname));
                 for (int m = 0; m < g_n_merchant; m++) {
-                    if (!strcmp(tx[i].merchant, g_merchants[m])) {
-                        merchant_sum[m] += tx[i].amount;
+                    if (!strcmp(mname, g_merchants[m])) {
+                        merchant_sum[m] += amount;
                         break;
                     }
                 }
             }
-        } else if (tx[i].type == TX_RECHARGE || tx[i].type == TX_GRANT) {
-            recharge += tx[i].amount;
+        } else if (type == TX_RECHARGE || type == TX_GRANT) {
+            recharge += amount;
         }
     }
+    fclose(fp);
     if (out_consume)  *out_consume = round2(consume);
     if (out_times)    *out_times = times;
     if (out_recharge) *out_recharge = round2(recharge);

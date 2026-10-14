@@ -107,6 +107,11 @@ int campus_init(const char *data_dir);
 int campus_save(void);
 /* 当前卡片总数 */
 int campus_count(void);
+/* 载入时是否因超过 CARD_MAX 而丢弃了卡片。返回丢弃的风险提示：
+ * 1 表示可能被截断（已载满上限），0 表示正常 */
+int campus_card_truncated(void);
+/* 发卡上限 */
+int campus_card_max(void);
 /* 取第 i 张卡片，越界返回 NULL */
 Card *campus_at(int i);
 
@@ -126,11 +131,22 @@ int  campus_load_records(const char *id, Record *out, int max);
 int  campus_stats(const char *id, time_t from,
                   int *out_count, int *out_minutes, double *out_cost);
 /* 读取交易流水。id 为空表示全部卡；type 为 -1 表示全部类型；
- * from 为 0 表示不限时间。返回条数 */
+ * from 为 0 表示不限时间。返回条数。
+ * 采用「环形保留」：超过 max 条时保留最近 max 条；
+ * out_truncated（可传 NULL）回传是否发生了截断 */
 int  campus_load_ledger(const char *id, int type, time_t from,
-                        Transaction *out, int max);
-/* 读取门禁记录。id 为空表示全部卡；返回条数 */
-int  campus_load_access(const char *id, AccessLog *out, int max);
+                        Transaction *out, int max, int *out_truncated);
+/* 只统计符合条件的流水条数，不取内容。参数含义同上 */
+int  campus_count_ledger(const char *id, int type, time_t from);
+/* 分页读取交易流水：skip 为跳过的条数（按时间正序）。返回条数 */
+int  campus_load_ledger_page(const char *id, int type, time_t from,
+                             int skip, Transaction *out, int max);
+/* 读取门禁记录。id 为空表示全部卡；保留最近 max 条。
+ * out_truncated 回传是否截断 */
+int  campus_load_access(const char *id, AccessLog *out, int max,
+                        int *out_truncated);
+/* 只统计门禁记录条数 */
+int  campus_count_access(const char *id);
 /* 汇总某卡在 [from, 现在] 的消费。返回笔数，回传合计金额 */
 int  campus_sum_consume(const char *id, time_t from, double *out_total);
 /* 商户/消费点名称表。返回商户数量，out 指向名称数组 */

@@ -174,7 +174,8 @@
     fill($('#selPosMerchant'), null);
   }
 
-  /* 交易流水渲染。admin 为真时显示卡号列 */
+  /* 交易流水渲染。admin 为真时显示卡号列。
+   * 服务端分页返回（每页 300 条），这里只渲染当前页，并提示总数与翻页 */
   async function paintLedger(tbody, period, admin) {
     if (!tbody) return;
     const r = admin ? await API.admLedger(period) : await API.ledger(period);
@@ -187,6 +188,14 @@
           <td class="num">${money(t.amount)}</td>
           <td class="num">${money(t.balance)}</td></tr>`).join('')
       : emptyRow(admin ? 6 : 5, '该时段暂无交易');
+
+    /* 分页信息：总数超过一页时给出提示 */
+    const tip = $(admin ? '#ledgerCount' : '#recCount2');
+    if (tip) {
+      tip.textContent = r.total > r.count
+        ? `共 ${r.total} 条，本页显示最近 ${r.count} 条`
+        : `共 ${r.total} 条`;
+    }
     return r.total;
   }
 
@@ -359,6 +368,18 @@
 
     if (state.view === 'admin-card') {
       $('#cardSummary').textContent = `${c.total} 张卡 · 上机中 ${c.onlineCount} 人`;
+      /* 载入时若因超过上限丢卡，明确告警，避免用户误以为数据丢失 */
+      const warn = $('#cardWarn');
+      if (warn) {
+        if (c.cardTruncated) {
+          warn.classList.remove('hidden');
+          warn.innerHTML = `⚠ 卡片数已达上限 <b>${c.cardMax}</b> 张，`
+            + `数据文件中还有卡片未被载入。数据未丢失，但当前不可见——`
+            + `请提高 CARD_MAX 后重启服务。`;
+        } else {
+          warn.classList.add('hidden');
+        }
+      }
       $('#tblCards tbody').innerHTML = c.cards.map((k) => `<tr>
           <td>${esc(k.id)}</td><td>${esc(k.name)}</td><td>${esc(k.number)}</td>
           <td class="num">${money(k.remain)}</td>

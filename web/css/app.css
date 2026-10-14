@@ -273,3 +273,10 @@ body.is-offline .card-visual { filter: grayscale(.35); }
   .nav-btn { font-size: 13px; padding: 8px 11px; }
   .stat-grid.four { grid-template-columns: 1fr 1fr; }
 }
+/* ---------------- 数据告警框 ---------------- */
+.warn-box {
+  background: var(--warn-soft); border: 1px solid #f0d5a8; color: #8a5a00;
+  border-radius: var(--radius-sm); padding: 10px 12px; font-size: 13px;
+  margin-bottom: 12px; line-height: 1.6;
+}
+.mb8 { margin-bottom: 8px; }

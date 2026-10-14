@@ -215,7 +215,7 @@ static void show_card(const Card *card) {
 /* 显示交易流水表。id 为空显示全部；type 为 -1 显示全部类型；limit 为条数上限 */
 static void show_ledger(const char *id, int type, int limit) {
     static Transaction tx[LEDGER_MAX];
-    int n = campus_load_ledger(id, type, 0, tx, LEDGER_MAX);
+    int n = campus_load_ledger(id, type, 0, tx, LEDGER_MAX, NULL);
     int start = n > limit ? n - limit : 0;
 
     if (n == 0) {
@@ -290,7 +290,7 @@ static void student_ledger(Card *card) {
     printf("------------ 交易流水（%s） ------------\n", card->id);
     {
         static Transaction tx[LEDGER_MAX];
-        int n = campus_load_ledger(card->id, -1, from, tx, LEDGER_MAX);
+        int n = campus_load_ledger(card->id, -1, from, tx, LEDGER_MAX, NULL);
         if (!n) {
             printf("    该时间段暂无交易。\n");
         } else {
@@ -1047,7 +1047,7 @@ static void report_access(void) {
 
     if (c == 3) {
         static AccessLog logs[ACCESS_MAX];
-        int n = campus_load_access(NULL, logs, ACCESS_MAX);
+        int n = campus_load_access(NULL, logs, ACCESS_MAX, NULL);
         int start = n > 40 ? n - 40 : 0;
         printf("---------------- 门禁 / 考勤记录 ----------------\n");
         if (!n) {
@@ -1096,6 +1096,9 @@ static void report_cards(void) {
     int n = campus_count();
     clear_screen();
     printf("---------------- 全部校园卡（%d 张） ----------------\n", n);
+    if (campus_card_truncated())
+        printf("    ⚠ 警告：卡片数已达上限 %d，数据文件中的其余卡片未被载入！\n",
+               campus_card_max());
     printf("    卡号   姓名   学号         余额      累计充值  状态    今日消费\n");
     printf("    ------------------------------------------------------------------\n");
     for (int i = 0; i < n; i++) {
@@ -1160,6 +1163,9 @@ int main(void) {
     SetConsoleOutputCP(65001);
 #endif
     campus_init("data");
+    if (campus_card_truncated())
+        printf("⚠ 警告：卡片数超过上限 %d，部分卡片未被载入（数据未丢失，但本次不可见）\n",
+               campus_card_max());
 
     while (1) {
         switch (menu("校园一卡通系统", "  请选择登录角色：\n", roles, 3)) {

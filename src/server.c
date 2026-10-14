@@ -45,6 +45,8 @@ static void sock_cleanup(void) { }
 #endif
 
 #define REQ_MAX (256 * 1024)
+/* 单次返回的最大记录数：防止响应超过缓冲被截断 */
+#define ACCESS_PAGE 300
 #define RES_MAX (512 * 1024)
 
 static char g_web[256] = "web";
@@ -318,19 +320,37 @@ static void h_stats(const char *token, const char *pwd, const char *period) {
     j_fmt("\"hours\":%.2f", minutes / 60.0);
     j_put("}");
 }
-/* 交易流水（学生查自己的；管理员可查全部） */
+/* 交易流水（学生查自己的；管理员可查全部）。
+ * 必须分页：全部流水可能上万条，一次性序列化会超出响应缓冲，
+ * 导致客户端收到被截断的畸形 JSON */
+#define LEDGER_PAGE 300
 static void h_ledger(const char *token, const char *pwd, const char *period,
-                     int as_admin) {
-    static Transaction tx[LEDGER_MAX];
-    int n;
+                     int as_admin, const char *query) {
+    static Transaction tx[LEDGER_PAGE];
+    char off[16] = "";
+    int total, skip, n;
     const char *id;
     if (!auth(token, pwd, as_admin)) return;
     id = as_admin ? "" : token;
-    n = campus_load_ledger(id, -1, period_start(period), tx, LEDGER_MAX);
+
+    q_get(query, "offset", off, sizeof(off));
+    skip = *off ? atoi(off) : 0;
+    if (skip < 0) skip = 0;
+
+    total = campus_count_ledger(id, -1, period_start(period));
+    n = campus_load_ledger_page(id, -1, period_start(period), skip, tx, LEDGER_PAGE);
+
     j_init(g_buf, g_cap);
-    j_put("{\"ok\":true,\"records\":[");
+    j_put("{\"ok\":true,");
+    kv_i("total", total);                 j_put(",");
+    kv_i("offset", skip);                 j_put(",");
+    kv_i("limit", LEDGER_PAGE);           j_put(",");
+    kv_i("count", n);                     j_put(",");
+    /* 是否还有下一页，便于前端做「加载更多」 */
+    j_put("\"hasMore\":"); j_put((skip + n < total) ? "true" : "false");
+    j_put(",\"records\":[");
     for (int i = 0; i < n; i++) { if (i) j_put(","); put_tx(&tx[i]); }
-    j_fmt("],\"total\":%d}", n);
+    j_put("]}");
 }
 /* 消费统计 */
 static void h_consume(const char *token, const char *pwd, const char *period) {
@@ -465,14 +485,20 @@ static void h_access(const char *token, const char *pwd, const char *body,
 /* 门禁记录 */
 static void h_access_log(const char *token, const char *pwd, const char *id,
                          int as_admin) {
-    static AccessLog logs[ACCESS_MAX];
-    int n;
+    /* 同样限制条数：门禁记录也可能上千条，全量序列化会超出响应缓冲 */
+    static AccessLog logs[ACCESS_PAGE];
+    int n, truncated = 0, total;
     if (!auth(token, pwd, as_admin)) return;
-    n = campus_load_access(as_admin ? id : token, logs, ACCESS_MAX);
+    total = campus_count_access(as_admin ? id : token);
+    n = campus_load_access(as_admin ? id : token, logs, ACCESS_PAGE, &truncated);
     j_init(g_buf, g_cap);
-    j_put("{\"ok\":true,\"records\":[");
+    j_put("{\"ok\":true,");
+    kv_i("total", total);     j_put(",");
+    kv_i("count", n);         j_put(",");
+    j_put("\"truncated\":"); j_put(truncated ? "true" : "false");
+    j_put(",\"records\":[");
     for (int i = 0; i < n; i++) { if (i) j_put(","); put_access(&logs[i]); }
-    j_fmt("],\"total\":%d}", n);
+    j_put("]}");
 }
 
 /* ============================================================
@@ -494,6 +520,10 @@ static void h_admin_cards(const char *token, const char *pwd) {
     }
     j_put("],");
     kv_i("total", campus_count());   j_put(",");
+    kv_i("cardMax", campus_card_max()); j_put(",");
+    /* 载入时是否有卡片因超过上限被丢弃，前端据此提示用户 */
+    j_put("\"cardTruncated\":"); j_put(campus_card_truncated() ? "true" : "false");
+    j_put(",");
     kv_d("remainTotal", remain);     j_put(",");
     kv_d("rechargeTotal", recharge); j_put(",");
     kv_i("onlineCount", online);
@@ -650,7 +680,11 @@ static void route(const char *method, const char *path, const char *query,
 
     if (!strcmp(path, "/api/health")) {
         j_put("{\"ok\":true,\"service\":\"campus-card\"");
-        j_fmt(",\"cards\":%d,\"rate\":%.2f}", campus_count(), RATE_PER_HOUR);
+        j_fmt(",\"cards\":%d,\"rate\":%.2f", campus_count(), RATE_PER_HOUR);
+        j_fmt(",\"cardMax\":%d", campus_card_max());
+        j_put(",\"cardTruncated\":");
+        j_put(campus_card_truncated() ? "true" : "false");
+        j_put("}");
         return;
     }
     if (!strcmp(path, "/api/login") && post) {
@@ -683,7 +717,7 @@ static void route(const char *method, const char *path, const char *query,
     }
     if (!strcmp(path, "/api/ledger")) {
         q_get(query, "period", period, sizeof(period));
-        h_ledger(token, pwd, *period ? period : "all", 0);
+        h_ledger(token, pwd, *period ? period : "all", 0, query);
         return;
     }
     if (!strcmp(path, "/api/consume")) {
@@ -709,7 +743,7 @@ static void route(const char *method, const char *path, const char *query,
     if (!strcmp(path, "/api/admin/report")) { h_admin_report(token, pwd); return; }
     if (!strcmp(path, "/api/admin/ledger")) {
         q_get(query, "period", period, sizeof(period));
-        h_ledger(token, pwd, *period ? period : "day", 1);
+        h_ledger(token, pwd, *period ? period : "day", 1, query);
         return;
     }
     if (!strcmp(path, "/api/admin/access")) {
