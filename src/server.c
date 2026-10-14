@@ -14,6 +14,7 @@
 #include <stdarg.h>
 #include <stdint.h>      /* intptr_t：统一套接字返回类型 */
 #include <string.h>
+#include <ctype.h>       /* isxdigit：解析 \uXXXX 转义时使用 */
 #include <time.h>
 #include "campus.h"
 
