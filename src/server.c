@@ -465,6 +465,11 @@ static const char *mime_of(const char *path) {
     if (!strcmp(dot, ".js"))   return "application/javascript; charset=utf-8";
     if (!strcmp(dot, ".svg"))  return "image/svg+xml";
     if (!strcmp(dot, ".ico"))  return "image/x-icon";
+    /* 以下为 PWA 所需：清单文件、图标、以及根路径的 Service Worker */
+    if (!strcmp(dot, ".png"))  return "image/png";
+    if (!strcmp(dot, ".json")) return "application/json; charset=utf-8";
+    if (!strcmp(dot, ".webmanifest"))
+        return "application/manifest+json; charset=utf-8";
     return "text/plain; charset=utf-8";
 }
 static int send_all(sock_t fd, const char *buf, size_t len) {
@@ -478,10 +483,12 @@ static int send_all(sock_t fd, const char *buf, size_t len) {
 }
 static void send_head(sock_t fd, int code, const char *status,
                       const char *mime, size_t len) {
-    char head[320];
+    char head[420];
     snprintf(head, sizeof(head),
              "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
              "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\n"
+             /* PWA：允许 Service Worker 从站点根路径注册并控制整个站点范围 */
+             "Service-Worker-Allowed: /\r\n"
              "Connection: close\r\n\r\n",
              code, status, mime, len);
     (void)send_all(fd, head, strlen(head));

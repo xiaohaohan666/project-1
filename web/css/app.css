@@ -179,3 +179,66 @@ tbody tr:hover{background:#fafbfe}
   box-shadow:0 12px 30px rgba(16,24,40,.3);z-index:80;max-width:88vw;text-align:center}
 .toast.ok{background:#047857}
 .toast.err{background:#b91c1c}
+
+/* ============================================================
+ *  PWA / 应用模式适配
+ * ============================================================ */
+
+/* 独立窗口（安装后）运行时：去掉浏览器式留白，顶部贴合状态栏 */
+@media (display-mode: standalone) {
+  .topbar-in { padding-top: 6px; }
+  .login-wrap { min-height: 100dvh; }
+}
+
+/* 刘海屏安全区：左右避让、底部避让（依赖 viewport-fit=cover） */
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+.login-wrap { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+.layout { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+.topbar-in { padding-top: calc(10px + env(safe-area-inset-top)); }
+.toast { bottom: calc(34px + env(safe-area-inset-bottom)); }
+.modal { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+
+/* 动态视口高度：手机地址栏收起/展开时不跳动 */
+.login-wrap { min-height: 100vh; min-height: 100dvh; }
+
+/* ---------------- 安装引导 ---------------- */
+.install-hint {
+  display: flex; flex-direction: column; gap: 2px;
+  width: 100%; max-width: 400px; margin: 0 auto;
+  background: var(--panel); border: 1px dashed #c9d7f5;
+  border-radius: var(--radius); padding: 13px 16px;
+  font: inherit; color: var(--text); text-align: left;
+  cursor: pointer; transition: .16s;
+}
+.install-hint:hover { border-color: var(--brand); background: var(--brand-soft); }
+.install-hint b { font-size: 14px; color: var(--brand); }
+.install-hint span { font-size: 12.5px; color: var(--muted); }
+
+/* ---------------- 离线提示条 ---------------- */
+.offline-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 70;
+  background: #b45309; color: #fff; font-size: 12.5px;
+  text-align: center; padding: 7px 12px;
+  padding-bottom: calc(7px + env(safe-area-inset-bottom));
+}
+/* 离线时画面轻微降饱和，直观传达"数据可能不是最新" */
+body.is-offline .card-visual { filter: grayscale(.35); }
+
+/* ---------------- 触屏优化 ---------------- */
+@media (hover: none) {
+  /* 触屏设备取消 hover 位移，避免点击时抖动 */
+  .btn:active { transform: none; }
+  .tile:hover { transform: none; }
+  /* 触控目标不小于 40px，避免误触 */
+  .btn { min-height: 40px; }
+  .seg button { min-height: 34px; }
+  /* 表单控件字号≥16px，防止 iOS 聚焦时自动放大页面 */
+  .input, .field input { font-size: 16px; }
+}
+/* 尊重系统"减少动态效果"设置 */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

@@ -47,6 +47,7 @@
   function enterApp() {
     $('#login').classList.add('hidden');
     $('#app').classList.remove('hidden');
+    $('#installHint')?.classList.add('hidden');   /* 已进主界面，收起安装引导 */
     $('#topRole').textContent = state.admin ? '管理员' : '学生';
     $('#topSub').textContent = state.admin ? '机房管理端' : '机房上机计费';
     $('#viewStudent').classList.toggle('hidden', state.admin);
@@ -61,6 +62,8 @@
     $('#app').classList.add('hidden');
     $('#login').classList.remove('hidden');
     $('#inPwd').value = '';
+    /* 回到登录页后，若浏览器支持安装则重新露出安装引导 */
+    if (window.PWA && window.PWA.canInstall) $('#installHint')?.classList.remove('hidden');
   };
   $('#btnRefresh').onclick = () => refresh(true);
 
@@ -294,8 +297,25 @@
         state.card = c.card;
       }
       enterApp();
+      handleShortcut();                   /* 从桌面快捷方式进入时直达对应功能 */
     } catch (e) { API.setAuth('', ''); }
   })();
+
+  /* 处理 PWA 快捷方式深链：/?action=online 或 /?action=stats */
+  function handleShortcut() {
+    const action = new URLSearchParams(location.search).get('action');
+    if (!action || state.admin) return;
+    /* 清掉查询串，避免刷新后重复触发 */
+    history.replaceState(null, '', location.pathname);
+    if (action === 'online') {
+      if (state.card && state.card.online === 1) { ok('当前已在上机中'); return; }
+      const el = $('#machineIdle');
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      $('#selPlace')?.focus();
+    } else if (action === 'stats') {
+      $('#segPeriod')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
 
   /* 页面重新可见时自动刷新，保证多端数据一致 */
   document.addEventListener('visibilitychange', () => {
