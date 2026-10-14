@@ -1,0 +1,45 @@
+name: probe
+
+# 临时诊断：在 Linux 复现命令行版冒烟测试，并把详细过程写入 probe-report 分支
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 复现冒烟测试并记录细节
+        run: |
+          set +e
+          gcc -std=c11 -Wall -Wextra -O2 -Isrc main.c src/campus.c -o campus-cli
+          echo "编译退出码=$?"
+          mkdir -p smoke && cd smoke
+          cp ../campus-cli .
+          printf '1\nC001\n123456\n2\n1\n3\n4\n1\n0\n0\n' > in.txt
+          {
+            echo "--- in.txt 内容（od 检查是否有 \\r）---"
+            od -c in.txt | head -5
+            ./campus-cli < in.txt > out.txt 2> err.txt
+            echo "运行退出码=$?"
+            echo "--- out.txt ---"
+            cat out.txt
+            echo "--- err.txt ---"
+            cat err.txt
+            echo "--- 数据目录 ---"
+            ls -la data
+            echo "--- C001.txt ---"
+            cat data/C001.txt
+          } > report.txt 2>&1
+          cd ..
+          cat smoke/report.txt
+          git config user.name "probe-bot"
+          git config user.email "probe@example.com"
+          git add -f smoke/report.txt
+          git commit -m "probe: 冒烟测试细节" -m "$(cat smoke/report.txt)"
+          git push origin HEAD:refs/heads/probe-report --force
