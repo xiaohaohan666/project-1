@@ -1,0 +1,26 @@
+name: probe
+
+# 临时诊断工作流：在 Linux 上编译并把完整报错与源文件作为产物上传
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 编译并抓取完整报错
+        run: |
+          mkdir -p out
+          gcc -std=c11 -Wall -Wextra -O2 -Isrc src/server.c src/campus.c -o out/campus-server \
+              > out/build.log 2>&1 || true
+          echo "=== gcc exit captured ===" >> out/build.log
+          cp -r src out/src
+          wc -l src/server.c src/campus.c src/campus.h
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-report
+          path: out/
