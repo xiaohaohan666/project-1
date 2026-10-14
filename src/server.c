@@ -1,13 +1,15 @@
 /* ============================================================
- *  模拟校园卡 —— HTTP/JSON 服务（可部署到云平台）
- *  纯 C + WinSock2，无第三方依赖；同时托管前端静态页面。
+ *  校园一卡通 —— HTTP/JSON 服务（可部署到云平台）
+ *  纯 C，跨 Windows(WinSock) / Linux(BSD socket)，无第三方依赖；
+ *  同时托管前端静态页面（含 PWA 的 sw.js 与 manifest）。
  * ------------------------------------------------------------
  *  用法: server [端口] [web目录] [数据目录] [监听地址]
- *        端口优先取环境变量 PORT（云平台会注入），其次命令行，默认 8090
+ *        端口优先取环境变量 PORT（云平台注入），其次命令行，默认 8090
  *        监听地址默认 0.0.0.0（容器内需对外可访问）
  * ------------------------------------------------------------
  *  无会话设计：每个请求带 X-Token（学生为卡号，管理员为 ADMIN）与
  *  X-Pwd（对应密码），服务端每次校验，因此天然支持多副本部署。
+ *  消费类请求额外带 X-PayPwd（交易密码）。
  * ============================================================ */
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,13 +20,12 @@
 #include <time.h>
 #include "campus.h"
 
-/* ---------------- 网络层跨平台适配（Windows WinSock / Linux BSD socket） ---------------- */
+/* ---------------- 网络层跨平台适配 ---------------- */
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
-typedef SOCKET sock_t;                      /* Windows 的套接字类型 */
+typedef SOCKET sock_t;
 #  define sock_close closesocket
-/* 初始化 WinSock。成功返回 0 */
 static int sock_init(void) {
     WSADATA w;
     return WSAStartup(MAKEWORD(2, 2), &w);
@@ -35,7 +36,7 @@ static void sock_cleanup(void) { WSACleanup(); }
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <unistd.h>
-typedef int sock_t;                         /* Linux 的套接字类型   */
+typedef int sock_t;
 #  define sock_close close
 #  define INVALID_SOCKET (-1)
 #  define SOCKET_ERROR   (-1)
@@ -43,20 +44,18 @@ static int  sock_init(void)    { return 0; }
 static void sock_cleanup(void) { }
 #endif
 
-#define REQ_MAX (256 * 1024)        /* 请求缓冲上限 */
-#define RES_MAX (512 * 1024)        /* 响应缓冲上限 */
+#define REQ_MAX (256 * 1024)
+#define RES_MAX (512 * 1024)
 
-static char g_web[256] = "web";     /* 静态页面目录 */
+static char g_web[256] = "web";
 
 /* ============================================================
  *                    JSON 输出小工具
  * ============================================================ */
-static char  *g_buf;                /* 输出缓冲 */
-static size_t g_len, g_cap;         /* 已写长度 / 容量 */
+static char  *g_buf;
+static size_t g_len, g_cap;
 
-/* 初始化输出缓冲 */
 static void j_init(char *buf, size_t cap) { g_buf = buf; g_len = 0; g_cap = cap; g_buf[0] = '\0'; }
-/* 追加原始字符串 */
 static void j_put(const char *s) {
     size_t n = strlen(s);
     if (g_len + n + 1 > g_cap) n = g_cap - g_len - 1;
@@ -64,7 +63,6 @@ static void j_put(const char *s) {
     g_len += n;
     g_buf[g_len] = '\0';
 }
-/* 追加格式化文本 */
 static void j_fmt(const char *fmt, ...) {
     char tmp[512];
     va_list ap;
@@ -73,7 +71,6 @@ static void j_fmt(const char *fmt, ...) {
     va_end(ap);
     j_put(tmp);
 }
-/* 追加 JSON 字符串（转义引号与控制字符） */
 static void j_str(const char *s) {
     char out[1200];
     size_t o = 0;
@@ -97,16 +94,14 @@ static void j_str(const char *s) {
 static void kv_s(const char *k, const char *v) { j_str(k); j_put(":"); j_str(v); }
 static void kv_d(const char *k, double v)       { j_str(k); j_fmt(":%.2f", v); }
 static void kv_i(const char *k, long v)         { j_str(k); j_fmt(":%ld", v); }
-/* 统一的错误响应 */
 static void res_err(const char *msg) {
     j_init(g_buf, g_cap);
     j_put("{\"ok\":false,\"error\":"); j_str(msg); j_put("}");
 }
 
 /* ============================================================
- *              极简 JSON / 查询串取值
+ *              极简 JSON / 查询串 / 请求头取值
  * ============================================================ */
-/* 取查询串参数。query 形如 "a=1&b=2"。未找到时 out 置空 */
 static const char *q_get(const char *query, const char *key, char *out, int osz) {
     char pat[32];
     const char *p;
@@ -120,22 +115,20 @@ static const char *q_get(const char *query, const char *key, char *out, int osz)
     out[i] = '\0';
     return out;
 }
-/* 取请求体 JSON 的字符串字段；找到返回 1 */
 static int j_get_str(const char *body, const char *key, char *out, int osz) {
     char pat[48];
     const char *p;
     int i = 0;
     snprintf(pat, sizeof(pat), "\"%s\"", key);
     p = strstr(body, pat);
-    if (!p) return 0;
+    if (!p) { out[0] = '\0'; return 0; }
     p += strlen(pat);
     while (*p == ' ' || *p == ':' || *p == '\t') p++;
-    if (*p != '"') return 0;
+    if (*p != '"') { out[0] = '\0'; return 0; }
     p++;
     while (*p && *p != '"' && i < osz - 1) {
         if (p[0] == '\\' && p[1] == 'u' && isxdigit((unsigned char)p[2])) {
-            /* 兼容 \uXXXX 转义：转成 UTF-8 写入。前端 JSON.stringify 一般直接
-             * 发原始 UTF-8，但其他客户端（如 Python json.dumps）可能发转义形式 */
+            /* 兼容 \uXXXX 转义：转成 UTF-8 写入 */
             unsigned int cp = 0;
             int k;
             for (k = 2; k < 6 && isxdigit((unsigned char)p[k]); k++) {
@@ -157,13 +150,12 @@ static int j_get_str(const char *body, const char *key, char *out, int osz) {
             p += 6;
             continue;
         }
-        if (p[0] == '\\' && p[1]) p++;      /* 其他转义：取原字符 */
+        if (p[0] == '\\' && p[1]) p++;
         out[i++] = *p++;
     }
     out[i] = '\0';
     return 1;
 }
-/* 取请求体 JSON 的数字字段；找不到返回默认值 */
 static double j_get_num(const char *body, const char *key, double dflt) {
     char pat[48];
     const char *p;
@@ -173,6 +165,38 @@ static double j_get_num(const char *body, const char *key, double dflt) {
     p += strlen(pat);
     while (*p == ' ' || *p == ':' || *p == '\t') p++;
     return atof(p);
+}
+/* 取请求头字段值（头名不区分大小写） */
+static int ci_ncmp(const char *a, const char *b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cb >= 'A' && cb <= 'Z') cb += 32;
+        if (ca != cb) return ca - cb;
+        if (!ca) break;
+    }
+    return 0;
+}
+static int header_value(const char *req, const char *name, char *out, int osz) {
+    size_t nlen = strlen(name);
+    const char *p = req;
+    out[0] = '\0';
+    while (p && *p) {
+        const char *eol = strstr(p, "\r\n");
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len == 0) break;
+        if (len > nlen && !ci_ncmp(p, name, nlen) && p[nlen] == ':') {
+            const char *v = p + nlen + 1;
+            int i = 0;
+            while (*v == ' ' || *v == '\t') v++;
+            while (v < p + len && i < osz - 1) out[i++] = *v++;
+            out[i] = '\0';
+            return 1;
+        }
+        if (!eol) break;
+        p = eol + 2;
+    }
+    return 0;
 }
 
 /* ============================================================
@@ -189,7 +213,11 @@ static void put_card(const Card *k) {
     kv_s("stateText", campus_state_text(k->state)); j_put(",");
     kv_i("online", k->online);     j_put(",");
     kv_s("startTime", k->start_time); j_put(",");
-    kv_s("address", k->address);
+    kv_s("address", k->address);   j_put(",");
+    kv_d("limitOnce", k->limit_once); j_put(",");
+    kv_d("limitDay", k->limit_day);   j_put(",");
+    kv_d("usedDay", k->used_day);     j_put(",");
+    kv_s("expire", k->expire);
     j_put("}");
 }
 static void put_record(const Record *r) {
@@ -203,12 +231,35 @@ static void put_record(const Record *r) {
     kv_s("address", r->address);
     j_put("}");
 }
+static void put_tx(const Transaction *t) {
+    j_put("{");
+    kv_i("seq", t->seq);              j_put(",");
+    kv_s("time", t->time);            j_put(",");
+    kv_s("id", t->id);                j_put(",");
+    kv_i("type", t->type);            j_put(",");
+    kv_s("typeText", campus_type_text(t->type)); j_put(",");
+    kv_s("merchant", t->merchant);    j_put(",");
+    kv_d("amount", t->amount);        j_put(",");
+    kv_d("balance", t->balance);      j_put(",");
+    kv_s("device", t->device);        j_put(",");
+    kv_s("memo", t->memo);
+    j_put("}");
+}
+static void put_access(const AccessLog *a) {
+    j_put("{");
+    kv_s("id", a->id);      j_put(",");
+    kv_s("time", a->time);  j_put(",");
+    kv_i("dir", a->dir);    j_put(",");
+    kv_s("dirText", a->dir == ACC_IN ? "进入" : "离开"); j_put(",");
+    kv_s("place", a->place); j_put(",");
+    kv_i("kind", a->kind);  j_put(",");
+    kv_s("kindText", a->kind == ACCESS_DOOR ? "门禁" : "考勤");
+    j_put("}");
+}
 
 /* ============================================================
  *                      认证与时间区间
  * ============================================================ */
-/* 校验身份。token 卡号或 ADMIN；pwd 对应密码；as_admin 期望身份。
- * 通过返回 1；失败时已写入错误响应并返回 0 */
 static int auth(const char *token, const char *pwd, int as_admin) {
     if (!*token) { res_err("缺少身份令牌 X-Token"); return 0; }
     if (!campus_login(token, pwd, as_admin)) {
@@ -217,14 +268,13 @@ static int auth(const char *token, const char *pwd, int as_admin) {
     }
     return 1;
 }
-/* 按时间段名返回起始时间；"all" 返回 0（不限起始） */
 static time_t period_start(const char *period) {
     time_t now = time(NULL);
     struct tm tm = *localtime(&now);
     if (!strcmp(period, "all")) return 0;
     if (!strcmp(period, "week")) {
-        int wday = tm.tm_wday;                      /* 0 为周日 */
-        tm.tm_mday -= (wday == 0) ? 6 : (wday - 1); /* 退到本周一 */
+        int wday = tm.tm_wday;
+        tm.tm_mday -= (wday == 0) ? 6 : (wday - 1);
     } else if (!strcmp(period, "month")) {
         tm.tm_mday = 1;
     }
@@ -233,9 +283,8 @@ static time_t period_start(const char *period) {
 }
 
 /* ============================================================
- *                        接口实现
+ *                      学生端接口
  * ============================================================ */
-/* 学生：卡内余额、状态、上机信息 */
 static void h_card(const char *token, const char *pwd) {
     Card *k;
     if (!auth(token, pwd, 0)) return;
@@ -244,7 +293,6 @@ static void h_card(const char *token, const char *pwd) {
     j_put("{\"ok\":true,\"card\":"); put_card(k);
     j_fmt(",\"rate\":%.2f}", RATE_PER_HOUR);
 }
-/* 学生：上机记录明细 */
 static void h_records(const char *token, const char *pwd) {
     static Record rec[REC_MAX];
     int n;
@@ -252,13 +300,10 @@ static void h_records(const char *token, const char *pwd) {
     n = campus_load_records(token, rec, REC_MAX);
     j_init(g_buf, g_cap);
     j_put("{\"ok\":true,\"records\":[");
-    for (int i = 0; i < n; i++) {
-        if (i) j_put(",");
-        put_record(&rec[i]);
-    }
+    for (int i = 0; i < n; i++) { if (i) j_put(","); put_record(&rec[i]); }
     j_fmt("],\"total\":%d}", n);
 }
-/* 学生：统计上机时间与费用，period=day|week|month|all */
+/* 机房上机统计 */
 static void h_stats(const char *token, const char *pwd, const char *period) {
     int count = 0, minutes = 0;
     double cost = 0.0;
@@ -273,7 +318,43 @@ static void h_stats(const char *token, const char *pwd, const char *period) {
     j_fmt("\"hours\":%.2f", minutes / 60.0);
     j_put("}");
 }
-/* 上机登记 / 下机结账。action=online 时需要 place */
+/* 交易流水（学生查自己的；管理员可查全部） */
+static void h_ledger(const char *token, const char *pwd, const char *period,
+                     int as_admin) {
+    static Transaction tx[LEDGER_MAX];
+    int n;
+    const char *id;
+    if (!auth(token, pwd, as_admin)) return;
+    id = as_admin ? "" : token;
+    n = campus_load_ledger(id, -1, period_start(period), tx, LEDGER_MAX);
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,\"records\":[");
+    for (int i = 0; i < n; i++) { if (i) j_put(","); put_tx(&tx[i]); }
+    j_fmt("],\"total\":%d}", n);
+}
+/* 消费统计 */
+static void h_consume(const char *token, const char *pwd, const char *period) {
+    double total = 0.0;
+    int n;
+    if (!auth(token, pwd, 0)) return;
+    n = campus_sum_consume(token, period_start(period), &total);
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,");
+    kv_s("period", period); j_put(",");
+    kv_i("count", n);       j_put(",");
+    kv_d("amount", total);
+    j_put("}");
+}
+/* 商户列表 */
+static void h_merchants(void) {
+    const char *names[MERCHANT_MAX];
+    int n = campus_merchants(names, MERCHANT_MAX);
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,\"merchants\":[");
+    for (int i = 0; i < n; i++) { if (i) j_put(","); j_str(names[i]); }
+    j_put("]}");
+}
+/* 机房上机 / 下机 */
 static void h_machine(const char *token, const char *pwd, const char *body) {
     Card *k;
     char action[12] = "", place[24] = "", err[64];
@@ -297,30 +378,106 @@ static void h_machine(const char *token, const char *pwd, const char *body) {
     j_fmt(",\"cost\":%.2f,\"card\":", cost); put_card(k);
     j_put("}");
 }
-/* 学生：自助挂失 */
-static void h_self_lost(const char *token, const char *pwd) {
+/* 消费扣款：需要交易密码（X-PayPwd 或 body.payPwd） */
+static void h_pay(const char *token, const char *pwd, const char *pay_pwd,
+                  const char *body) {
+    Card *k;
+    char merchant[24] = "", err[64];
+    double amount;
+    if (!auth(token, pwd, 0)) return;
+    k = campus_find(token);
+    j_get_str(body, "merchant", merchant, sizeof(merchant));
+    amount = j_get_num(body, "amount", 0);
+    /* 交易密码优先取请求体 payPwd；头部的 X-PayPwd 已在路由层取好。
+     * 注意用局部缓冲，不能写回 const 形参指向的内存 */
+    {
+        const char *use_pwd = pay_pwd;
+        char body_pwd[20] = "";
+        if (!*use_pwd && j_get_str(body, "payPwd", body_pwd, sizeof(body_pwd)))
+            use_pwd = body_pwd;
+
+        if (campus_pay(k, merchant, amount, use_pwd, "WEB-POS", err, sizeof(err))) {
+            res_err(err);
+            return;
+        }
+    }
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,\"message\":"); j_str("消费成功");
+    j_fmt(",\"amount\":%.2f,\"card\":", amount); put_card(k);
+    j_put("}");
+}
+/* 学生自助挂失 / 解除挂失 */
+static void h_self_lost(const char *token, const char *pwd, int unlost) {
     Card *k;
     char err[64];
     if (!auth(token, pwd, 0)) return;
     k = campus_find(token);
-    if (campus_set_lost(k, err, sizeof(err))) { res_err(err); return; }
+    if (unlost) {
+        if (campus_unlost(k, err, sizeof(err))) { res_err(err); return; }
+    } else {
+        if (campus_set_lost(k, err, sizeof(err))) { res_err(err); return; }
+    }
     j_init(g_buf, g_cap);
-    j_put("{\"ok\":true,\"message\":"); j_str("挂失成功，该卡不能再上机");
+    j_put("{\"ok\":true,\"message\":");
+    j_str(unlost ? "已解除挂失" : "挂失成功，该卡不能再消费与上机");
     j_put(",\"card\":"); put_card(k); j_put("}");
 }
-/* 学生：修改登录密码 */
-static void h_change_pwd(const char *token, const char *pwd, const char *body) {
+/* 学生修改登录密码 / 交易密码 */
+static void h_change_pwd(const char *token, const char *pwd, const char *body,
+                         int pay) {
     Card *k;
     char np[20] = "", err[64];
     if (!auth(token, pwd, 0)) return;
     k = campus_find(token);
     j_get_str(body, "newPwd", np, sizeof(np));
-    if (campus_change_pwd(k, pwd, np, err, sizeof(err))) { res_err(err); return; }
+    if ((pay ? campus_change_pay_pwd : campus_change_pwd)(k, pwd, np, err, sizeof(err))) {
+        res_err(err);
+        return;
+    }
     j_init(g_buf, g_cap);
-    j_put("{\"ok\":true,\"message\":"); j_str("密码修改成功"); j_put("}");
+    j_put("{\"ok\":true,\"message\":");
+    j_str(pay ? "交易密码修改成功" : "登录密码修改成功");
+    j_put("}");
+}
+/* 门禁 / 考勤刷卡（管理员代刷，或学生签到自己） */
+static void h_access(const char *token, const char *pwd, const char *body,
+                     int as_admin) {
+    Card *k;
+    char id[10] = "", place[24] = "", err[64];
+    int dir, kind;
+    if (!auth(token, pwd, as_admin)) return;
+    if (as_admin) {
+        j_get_str(body, "id", id, sizeof(id));
+        k = campus_find(id);
+        if (!k) { res_err("找不到该卡号"); return; }
+    } else {
+        k = campus_find(token);
+    }
+    j_get_str(body, "place", place, sizeof(place));
+    dir  = (int)j_get_num(body, "dir", ACC_IN);
+    kind = (int)j_get_num(body, "kind", ACCESS_DOOR);
+    if (campus_access(k, dir, kind, place, err, sizeof(err))) { res_err(err); return; }
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,\"message\":");
+    j_str(kind == ACCESS_DOOR ? "门禁刷卡成功" : "考勤签到成功");
+    j_put("}");
+}
+/* 门禁记录 */
+static void h_access_log(const char *token, const char *pwd, const char *id,
+                         int as_admin) {
+    static AccessLog logs[ACCESS_MAX];
+    int n;
+    if (!auth(token, pwd, as_admin)) return;
+    n = campus_load_access(as_admin ? id : token, logs, ACCESS_MAX);
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,\"records\":[");
+    for (int i = 0; i < n; i++) { if (i) j_put(","); put_access(&logs[i]); }
+    j_fmt("],\"total\":%d}", n);
 }
 
-/* 管理员：全部卡片与汇总 */
+/* ============================================================
+ *                      管理员接口
+ * ============================================================ */
 static void h_admin_cards(const char *token, const char *pwd) {
     double remain = 0.0, recharge = 0.0;
     int online = 0;
@@ -342,7 +499,38 @@ static void h_admin_cards(const char *token, const char *pwd) {
     kv_i("onlineCount", online);
     j_put("}");
 }
-/* 管理员：当天收入统计 */
+/* 当天报表：机房收入 + 全站汇总 + 各消费点 */
+static void h_admin_report(const char *token, const char *pwd) {
+    double fee = 0.0, consume = 0.0, recharge = 0.0;
+    double msum[MERCHANT_MAX];
+    const char *names[MERCHANT_MAX];
+    int times = 0, ct = 0, mn;
+    char today[12];
+    time_t t = time(NULL);
+    if (!auth(token, pwd, 1)) return;
+
+    campus_today_income(&fee, &times);
+    campus_today_report(&consume, &ct, &recharge, msum);
+    mn = campus_merchants(names, MERCHANT_MAX);
+    strftime(today, sizeof(today), "%Y-%m-%d", localtime(&t));
+
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,");
+    kv_s("day", today);            j_put(",");
+    kv_d("feeIncome", fee);        j_put(",");
+    kv_i("machineTimes", times);   j_put(",");
+    kv_d("consumeTotal", consume); j_put(",");
+    kv_i("consumeTimes", ct);      j_put(",");
+    kv_d("rechargeTotal", recharge); j_put(",");
+    j_put("\"merchants\":[");
+    for (int i = 0; i < mn; i++) {
+        if (i) j_put(",");
+        j_put("{\"name\":"); j_str(names[i]);
+        j_fmt(",\"amount\":%.2f}", msum[i]);
+    }
+    j_put("]}");
+}
+/* 兼容旧接口：仅当天机房收入 */
 static void h_admin_income(const char *token, const char *pwd) {
     double fee = 0.0;
     int times = 0;
@@ -358,7 +546,6 @@ static void h_admin_income(const char *token, const char *pwd) {
     kv_i("times", times);
     j_put("}");
 }
-/* 管理员：查看指定卡的上机记录（?id=C001） */
 static void h_admin_records(const char *token, const char *pwd, const char *id) {
     static Record rec[REC_MAX];
     int n;
@@ -368,15 +555,28 @@ static void h_admin_records(const char *token, const char *pwd, const char *id) 
     n = campus_load_records(id, rec, REC_MAX);
     j_init(g_buf, g_cap);
     j_put("{\"ok\":true,\"records\":[");
-    for (int i = 0; i < n; i++) {
-        if (i) j_put(",");
-        put_record(&rec[i]);
-    }
+    for (int i = 0; i < n; i++) { if (i) j_put(","); put_record(&rec[i]); }
     j_fmt("],\"total\":%d}", n);
 }
-/* 管理员：充值 / 挂失 / 重置密码（op 取自路径末段） */
-static void h_admin_op(const char *token, const char *pwd, const char *body, const char *op) {
-    char id[10] = "", err[64];
+/* 新卡注册（管理员或自助注册） */
+static void h_register(const char *body) {
+    char id[10] = "", name[12] = "", number[12] = "", pwd[20] = "", err[64];
+    j_get_str(body, "id", id, sizeof(id));
+    j_get_str(body, "name", name, sizeof(name));
+    j_get_str(body, "number", number, sizeof(number));
+    j_get_str(body, "pwd", pwd, sizeof(pwd));
+    if (campus_register(id, name, number, pwd, err, sizeof(err))) {
+        res_err(err);
+        return;
+    }
+    j_init(g_buf, g_cap);
+    j_put("{\"ok\":true,\"message\":"); j_str("注册成功");
+    j_put(",\"card\":"); put_card(campus_find(id)); j_put("}");
+}
+/* 管理员卡务操作：op 取自路径末段 */
+static void h_admin_op(const char *token, const char *pwd, const char *body,
+                       const char *op) {
+    char id[10] = "", err[64], date[12] = "";
     Card *k;
     if (!auth(token, pwd, 1)) return;
     j_get_str(body, "id", id, sizeof(id));
@@ -388,8 +588,30 @@ static void h_admin_op(const char *token, const char *pwd, const char *body, con
         if (campus_recharge(k, amount, err, sizeof(err))) { res_err(err); return; }
     } else if (!strcmp(op, "lost")) {
         if (campus_set_lost(k, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "unlost")) {
+        if (campus_unlost(k, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "freeze")) {
+        if (campus_freeze(k, (int)j_get_num(body, "on", 1), err, sizeof(err))) { res_err(err); return; }
     } else if (!strcmp(op, "reset")) {
         if (campus_reset_pwd(k, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "resetpay")) {
+        if (campus_reset_pay_pwd(k, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "reissue")) {
+        double fee = j_get_num(body, "fee", 0);
+        if (campus_reissue(k, fee, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "limits")) {
+        double once = j_get_num(body, "limitOnce", 0);
+        double day  = j_get_num(body, "limitDay", 0);
+        if (campus_set_limits(k, once, day, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "expire")) {
+        j_get_str(body, "date", date, sizeof(date));
+        if (campus_set_expire(k, date, err, sizeof(err))) { res_err(err); return; }
+    } else if (!strcmp(op, "grant")) {
+        double amount = j_get_num(body, "amount", 0);
+        char memo[32] = "";
+        int type = (int)j_get_num(body, "type", TX_GRANT);
+        j_get_str(body, "memo", memo, sizeof(memo));
+        if (campus_grant(k, type, amount, memo, err, sizeof(err))) { res_err(err); return; }
     } else {
         res_err("未知操作");
         return;
@@ -402,20 +624,22 @@ static void h_admin_op(const char *token, const char *pwd, const char *body, con
  *                        请求路由
  * ============================================================ */
 static void route(const char *method, const char *path, const char *query,
-                  const char *body, char *res, size_t cap) {
-    char token[16] = "", pwd[20] = "", period[12] = "", id[10] = "";
+                  const char *body, const char *pay_hdr,
+                  char *res, size_t cap) {
+    char token[16] = "", pwd[20] = "", period[12] = "", id[10] = "", pay[20] = "";
     int post = !strcmp(method, "POST");
 
     j_init(res, cap);
     q_get(query, "token", token, sizeof(token));
     q_get(query, "pwd", pwd, sizeof(pwd));
+    q_get(query, "payPwd", pay, sizeof(pay));
+    if (!*pay) snprintf(pay, sizeof(pay), "%s", pay_hdr);
 
     if (!strcmp(path, "/api/health")) {
         j_put("{\"ok\":true,\"service\":\"campus-card\"");
         j_fmt(",\"cards\":%d,\"rate\":%.2f}", campus_count(), RATE_PER_HOUR);
         return;
     }
-    /* 登录只做校验；令牌与密码由前端保存并在后续请求中携带 */
     if (!strcmp(path, "/api/login") && post) {
         char id2[10] = "", pw2[20] = "";
         int as_admin = strstr(body, "\"admin\":true") != NULL;
@@ -433,6 +657,10 @@ static void route(const char *method, const char *path, const char *query,
         j_put("}");
         return;
     }
+    if (!strcmp(path, "/api/register") && post) { h_register(body); return; }
+    if (!strcmp(path, "/api/merchants"))         { h_merchants();   return; }
+
+    /* 学生端 */
     if (!strcmp(path, "/api/card"))    { h_card(token, pwd);    return; }
     if (!strcmp(path, "/api/records")) { h_records(token, pwd); return; }
     if (!strcmp(path, "/api/stats")) {
@@ -440,17 +668,56 @@ static void route(const char *method, const char *path, const char *query,
         h_stats(token, pwd, *period ? period : "day");
         return;
     }
-    if (!strcmp(path, "/api/machine") && post) { h_machine(token, pwd, body);    return; }
-    if (!strcmp(path, "/api/lost")    && post) { h_self_lost(token, pwd);        return; }
-    if (!strcmp(path, "/api/pwd")     && post) { h_change_pwd(token, pwd, body); return; }
-    if (!strcmp(path, "/api/admin/cards"))     { h_admin_cards(token, pwd);      return; }
-    if (!strcmp(path, "/api/admin/income"))    { h_admin_income(token, pwd);     return; }
+    if (!strcmp(path, "/api/ledger")) {
+        q_get(query, "period", period, sizeof(period));
+        h_ledger(token, pwd, *period ? period : "all", 0);
+        return;
+    }
+    if (!strcmp(path, "/api/consume")) {
+        q_get(query, "period", period, sizeof(period));
+        h_consume(token, pwd, *period ? period : "day");
+        return;
+    }
+    if (!strcmp(path, "/api/access")) {
+        if (post) h_access(token, pwd, body, 0);
+        else      h_access_log(token, pwd, "", 0);
+        return;
+    }
+    if (!strcmp(path, "/api/machine") && post) { h_machine(token, pwd, body); return; }
+    if (!strcmp(path, "/api/pay")     && post) { h_pay(token, pwd, pay, body); return; }
+    if (!strcmp(path, "/api/lost")    && post) { h_self_lost(token, pwd, 0);   return; }
+    if (!strcmp(path, "/api/unlost")  && post) { h_self_lost(token, pwd, 1);   return; }
+    if (!strcmp(path, "/api/pwd")     && post) { h_change_pwd(token, pwd, body, 0); return; }
+    if (!strcmp(path, "/api/paypwd")  && post) { h_change_pwd(token, pwd, body, 1); return; }
+
+    /* 管理员端 */
+    if (!strcmp(path, "/api/admin/cards"))  { h_admin_cards(token, pwd);  return; }
+    if (!strcmp(path, "/api/admin/income")) { h_admin_income(token, pwd); return; }
+    if (!strcmp(path, "/api/admin/report")) { h_admin_report(token, pwd); return; }
+    if (!strcmp(path, "/api/admin/ledger")) {
+        q_get(query, "period", period, sizeof(period));
+        h_ledger(token, pwd, *period ? period : "day", 1);
+        return;
+    }
+    if (!strcmp(path, "/api/admin/access")) {
+        q_get(query, "id", id, sizeof(id));
+        if (post) {
+            /* 管理员代刷卡时复用统一处理，需要从 body 取卡号 */
+            h_access(token, pwd, body, 1);
+        } else {
+            h_access_log(token, pwd, id, 1);
+        }
+        return;
+    }
     if (!strcmp(path, "/api/admin/records")) {
         q_get(query, "id", id, sizeof(id));
         h_admin_records(token, pwd, id);
         return;
     }
-    if (!strncmp(path, "/api/admin/", 11) && post) { h_admin_op(token, pwd, body, path + 11); return; }
+    if (!strncmp(path, "/api/admin/", 11) && post) {
+        h_admin_op(token, pwd, body, path + 11);
+        return;
+    }
     res_err("接口不存在");
 }
 
@@ -465,7 +732,6 @@ static const char *mime_of(const char *path) {
     if (!strcmp(dot, ".js"))   return "application/javascript; charset=utf-8";
     if (!strcmp(dot, ".svg"))  return "image/svg+xml";
     if (!strcmp(dot, ".ico"))  return "image/x-icon";
-    /* 以下为 PWA 所需：清单文件、图标、以及根路径的 Service Worker */
     if (!strcmp(dot, ".png"))  return "image/png";
     if (!strcmp(dot, ".json")) return "application/json; charset=utf-8";
     if (!strcmp(dot, ".webmanifest"))
@@ -506,7 +772,7 @@ static void serve_static(sock_t fd, const char *path) {
 
     snprintf(full, sizeof(full), "%s%s", g_web, rel);
     fp = fopen(full, "rb");
-    if (!fp && !strchr(rel + 1, '.')) {             /* 前端路由回退首页 */
+    if (!fp && !strchr(rel + 1, '.')) {
         snprintf(full, sizeof(full), "%s/index.html", g_web);
         fp = fopen(full, "rb");
     }
@@ -524,45 +790,6 @@ static void serve_static(sock_t fd, const char *path) {
     free(buf);
 }
 
-/* 长度受限的大小写不敏感比较（不依赖平台专有函数，Windows/Linux 通用）。
- * a、b 待比较字符串；n 最多比较的字符数。
- * 相等返回 0，否则返回非 0 */
-static int ci_ncmp(const char *a, const char *b, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
-        if (ca >= 'A' && ca <= 'Z') ca += 32;       /* 统一转小写比较 */
-        if (cb >= 'A' && cb <= 'Z') cb += 32;
-        if (ca != cb) return ca - cb;
-        if (!ca) break;
-    }
-    return 0;
-}
-
-/* 取请求头字段值（头名不区分大小写）。
- * req 完整请求报文；name 头名；out 输出；osz 缓冲大小。找到返回 1 */
-static int header_value(const char *req, const char *name, char *out, int osz) {
-    size_t nlen = strlen(name);
-    const char *p = req;
-    out[0] = '\0';
-    /* 逐行扫描请求头，遇到空行（头部结束）即停止 */
-    while (p && *p) {
-        const char *eol = strstr(p, "\r\n");
-        size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        if (len == 0) break;                        /* 空行：请求头结束 */
-        if (len > nlen && !ci_ncmp(p, name, nlen) && p[nlen] == ':') {
-            const char *v = p + nlen + 1;
-            while (*v == ' ' || *v == '\t') v++;
-            int i = 0;
-            while (v < p + len && i < osz - 1) out[i++] = *v++;
-            out[i] = '\0';
-            return 1;
-        }
-        if (!eol) break;
-        p = eol + 2;
-    }
-    return 0;
-}
-
 /* ============================================================
  *                   连接处理与主函数
  * ============================================================ */
@@ -571,7 +798,7 @@ static void handle_conn(sock_t fd) {
     char *res = (char *)malloc(RES_MAX);
     size_t total = 0;
     int ready = 0;
-    char method[8] = "", path[256] = "", query[320] = "";
+    char method[8] = "", path[256] = "", query[320] = "", pay_hdr[20] = "";
     char *qmark, *body;
 
     if (!req || !res) { free(req); free(res); sock_close(fd); return; }
@@ -600,21 +827,22 @@ static void handle_conn(sock_t fd) {
     body = strstr(req, "\r\n\r\n");
     body = body ? body + 4 : req + strlen(req);
 
-    /* 3. 令牌与密码优先取请求头（HTTP 头名大小写不敏感），其次查询串 */
+    /* 3. 令牌、密码与交易密码优先取请求头（头名大小写不敏感） */
     {
-        char v[24];
+        char v[32];
         if (header_value(req, "X-Token", v, sizeof(v)))
             snprintf(query + strlen(query), sizeof(query) - strlen(query),
                      "%stoken=%s", *query ? "&" : "", v);
         if (header_value(req, "X-Pwd", v, sizeof(v)))
             snprintf(query + strlen(query), sizeof(query) - strlen(query),
                      "%spwd=%s", *query ? "&" : "", v);
+        header_value(req, "X-PayPwd", pay_hdr, sizeof(pay_hdr));
     }
 
     /* 4. 接口或静态文件 */
     if (!strncmp(path, "/api/", 5)) {
         size_t len;
-        route(method, path, query, body, res, RES_MAX);
+        route(method, path, query, body, pay_hdr, res, RES_MAX);
         len = strlen(res);
         send_head(fd, 200, "OK", "application/json; charset=utf-8", len);
         send_all(fd, res, len);
@@ -628,11 +856,10 @@ static void handle_conn(sock_t fd) {
     sock_close(fd);
 }
 
-/* 入口：端口 / web 目录 / 数据目录 / 监听地址 */
 int main(int argc, char **argv) {
     int port = 8090;
-    const char *env_port = getenv("PORT");      /* 云平台注入的端口 */
-    const char *host = "0.0.0.0";               /* 容器内需对外可访问 */
+    const char *env_port = getenv("PORT");
+    const char *host = "0.0.0.0";
     const char *data_dir = "data";
     sock_t srv;
     int yes = 1;
@@ -661,7 +888,7 @@ int main(int argc, char **argv) {
     }
     listen(srv, 32);
 
-    printf("模拟校园卡服务已启动 http://%s:%d/  卡片 %d 张  费率 %.2f 元/小时\n",
+    printf("校园一卡通服务已启动 http://%s:%d/  卡片 %d 张  机房费率 %.2f 元/小时\n",
            host, port, campus_count(), RATE_PER_HOUR);
     fflush(stdout);
 

@@ -1,17 +1,21 @@
 /* ============================================================
- *  模拟校园卡 —— 业务核心层实现
+ *  校园一卡通 —— 业务核心层实现
  * ------------------------------------------------------------
  *  设计要点：
  *    · 卡片一次载入内存（全局状态），改动后整体写回 cards.dat
- *    · 上机记录按卡分文件、追加写入，永不覆盖（<卡号>.txt）
- *    · 收入流水单独记录（income.dat），供统计当天收入
- *    · 计费：费率 RATE_PER_HOUR 元/小时，按实际分钟折算，保留两位小数
+ *    · 交易总账 ledger.dat 采用「追加写」，历史流水永不覆盖
+ *    · 门禁记录 access.dat 同样追加写
+ *    · 机房上机记录仍按卡分文件（<卡号>.txt），保留原题目要求
+ *    · 消费统一走 campus_pay()：集中处理状态、交易密码、单笔与日累计限额，
+ *      并把扣款与记账放在一起，便于审计
+ *    · 计费：机房费率 RATE_PER_HOUR 元/小时，按实际分钟折算，保留两位小数
  *    · 无会话状态：Web 端每次请求携带卡号与密码做校验，便于多端共用
  * ============================================================ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <ctype.h>
 #ifdef _WIN32
 #  include <direct.h>            /* _mkdir：Windows 下创建目录 */
 #else
@@ -20,12 +24,20 @@
 #endif
 #include "campus.h"
 
+/* ---------------- 商户 / 消费点表 ---------------- */
+/* 前 6 个为消费场景，最后一个为机房（保留原题目要求的上机计费） */
+static const char *g_merchants[MERCHANT_MAX] = {
+    "食堂", "超市", "文印店", "热水洗衣", "宿舍水电", "图书馆罚款", "机房"
+};
+static const int g_n_merchant = 7;
+
 /* ---------------- 全局状态 ---------------- */
 static Card g_cards[CARD_MAX];              /* 全部卡片               */
 static int  g_n_card;                       /* 卡片数量               */
-static char g_income_day[INCOME_MAX][12];   /* 收入流水：日期         */
+static char g_income_day[INCOME_MAX][12];   /* 收入流水：日期（兼容旧数据） */
 static double g_income_amt[INCOME_MAX];     /* 收入流水：金额（元）   */
 static int  g_n_income;                     /* 收入流水条数           */
+static long g_seq;                          /* 交易流水号自增计数     */
 static char g_dir[200];                     /* 数据目录               */
 
 /* ---------------- 内部工具 ---------------- */
@@ -38,7 +50,7 @@ static const char *path_of(const char *name) {
     return buf;
 }
 
-/* 取当前时间并按 fmt 格式化。buf 输出缓冲；size 缓冲大小；fmt 格式串 */
+/* 取当前时间并按 fmt 格式化 */
 static void now_fmt(char *buf, int size, const char *fmt) {
     time_t t = time(NULL);
     strftime(buf, (size_t)size, fmt, localtime(&t));
@@ -61,16 +73,53 @@ static time_t parse_time(const char *s) {
     return mktime(&tm);
 }
 
-/* 统一错误返回：写原因并返回 -1。err 缓冲；esz 大小；msg 原因 */
+/* 统一错误返回：写原因并返回 -1 */
 static int fail(char *err, int esz, const char *msg) {
     if (err && esz > 0) snprintf(err, (size_t)esz, "%s", msg);
     return -1;
 }
 
-/* 追加一条收入流水并落盘。amount 金额（元） */
+/* 确保数据目录存在，不存在则创建一层（跨平台）。成功返回 1 */
+static int ensure_dir(const char *dir) {
+    if (!dir || !*dir) return 1;
+#ifdef _WIN32
+    if (_mkdir(dir) == 0) return 1;
+#else
+    if (mkdir(dir, 0755) == 0) return 1;
+#endif
+    return 0;
+}
+
+/* 金额取两位小数（四舍五入） */
+static double round2(double v) { return floor(v * 100 + 0.5) / 100.0; }
+
+/* 判断卡片是否已过有效期。空有效期视为长期有效。
+ * 已过期时把状态置为 ST_EXPIRED 并返回 1 */
+static int check_expire(Card *card) {
+    char today[12];
+    if (!card->expire[0]) return 0;
+    now_fmt(today, sizeof(today), "%Y-%m-%d");
+    if (strcmp(today, card->expire) > 0) {      /* 字典序即日期序 */
+        card->state = ST_EXPIRED;
+        return 1;
+    }
+    return 0;
+}
+
+/* 把今日已消费金额按日期滚动清零（跨天自动重置） */
+static void roll_day(Card *card) {
+    char today[12];
+    now_fmt(today, sizeof(today), "%Y-%m-%d");
+    if (strcmp(card->used_date, today)) {
+        snprintf(card->used_date, sizeof(card->used_date), "%s", today);
+        card->used_day = 0.0;
+    }
+}
+
+/* 追加一条收入流水（兼容旧的 income.dat，供当天收入统计） */
 static void add_income(double amount) {
     FILE *fp;
-    if (g_n_income >= INCOME_MAX) {         /* 满则丢弃最早一条 */
+    if (g_n_income >= INCOME_MAX) {
         memmove(g_income_day[0], g_income_day[1],
                 sizeof(g_income_day[0]) * (INCOME_MAX - 1));
         memmove(&g_income_amt[0], &g_income_amt[1],
@@ -81,43 +130,116 @@ static void add_income(double amount) {
     g_income_amt[g_n_income] = amount;
     g_n_income++;
 
-    fp = fopen(path_of("income.dat"), "a");     /* 追加，不覆盖历史 */
+    fp = fopen(path_of("income.dat"), "a");
     if (fp) {
         fprintf(fp, "%s|%.2f\n", g_income_day[g_n_income - 1], amount);
         fclose(fp);
     }
 }
 
-/* ---------------- 载入与保存 ---------------- */
+/* ---------------- 交易总账：追加写 ---------------- */
+/* 追加一条交易流水。card 所属卡；type 类型；merchant 商户；
+ * amount 金额（正数）；device 终端号（可空）；memo 备注（可空） */
+static void add_tx(Card *card, int type, const char *merchant,
+                   double amount, const char *device, const char *memo) {
+    FILE *fp;
+    Transaction tx;
 
+    memset(&tx, 0, sizeof(tx));
+    tx.seq = ++g_seq;
+    now_fmt(tx.time, sizeof(tx.time), "%Y-%m-%d %H:%M:%S");
+    snprintf(tx.id, sizeof(tx.id), "%s", card->id);
+    tx.type = type;
+    snprintf(tx.merchant, sizeof(tx.merchant), "%s", merchant ? merchant : "");
+    tx.amount = round2(amount);
+    tx.balance = round2(card->remain);
+    snprintf(tx.device, sizeof(tx.device), "%s", device ? device : "");
+    snprintf(tx.memo, sizeof(tx.memo), "%s", memo ? memo : "");
+
+    fp = fopen(path_of("ledger.dat"), "a");     /* 追加：历史流水不覆盖 */
+    if (!fp) return;
+    fprintf(fp, "%ld|%s|%s|%d|%s|%.2f|%.2f|%s|%s\n",
+            tx.seq, tx.time, tx.id, tx.type, tx.merchant,
+            tx.amount, tx.balance, tx.device, tx.memo);
+    fclose(fp);
+}
+
+/* 载入交易总账，仅用于恢复流水号自增计数 */
+static void load_ledger_seq(void) {
+    char line[256];
+    FILE *fp = fopen(path_of("ledger.dat"), "r");
+    long max_seq = 0;
+    if (!fp) return;
+    while (fgets(line, sizeof(line), fp)) {
+        long s = strtol(line, NULL, 10);
+        if (s > max_seq) max_seq = s;
+    }
+    fclose(fp);
+    g_seq = max_seq;
+}
+
+/* ---------------- 门禁记录：追加写 ---------------- */
+static void add_access(Card *card, int dir, int kind, const char *place) {
+    FILE *fp = fopen(path_of("access.dat"), "a");
+    char t[20];
+    if (!fp) return;
+    now_fmt(t, sizeof(t), "%Y-%m-%d %H:%M:%S");
+    fprintf(fp, "%s|%s|%d|%s|%d\n", card->id, t, dir, place ? place : "", kind);
+    fclose(fp);
+}
+
+/* ---------------- 卡片读写 ---------------- */
 /* 保存全部卡片到 cards.dat。成功返回 1 */
 int campus_save(void) {
     FILE *fp = fopen(path_of("cards.dat"), "w");
     if (!fp) return 0;
     for (int i = 0; i < g_n_card; i++) {
         Card *k = &g_cards[i];
-        fprintf(fp, "%s|%s|%s|%s|%.2f|%.2f|%d|%d|%s|%s\n",
-                k->id, k->name, k->number, k->pwd, k->recharge, k->remain,
-                k->state, k->online, k->start_time, k->address);
+        fprintf(fp, "%s|%s|%s|%s|%s|%.2f|%.2f|%d|%d|%s|%s|%.2f|%.2f|%s|%.2f|%s\n",
+                k->id, k->name, k->number, k->pwd, k->pay_pwd,
+                k->recharge, k->remain, k->state, k->online,
+                k->start_time, k->address, k->limit_day, k->used_day,
+                k->used_date, k->limit_once, k->expire);
     }
     fclose(fp);
     return 1;
 }
 
-/* 读取 cards.dat 与 income.dat。返回读到的卡片数 */
+/* 读取 cards.dat 与 income.dat。返回读到的卡片数。
+ * 兼容两种行格式：旧版 10 字段（无交易密码与限额）与新版 16 字段 */
 static int campus_load(void) {
-    char line[256];
+    char line[320];
     FILE *fp = fopen(path_of("cards.dat"), "r");
 
     if (fp) {
         while (g_n_card < CARD_MAX && fgets(line, sizeof(line), fp)) {
             Card k;
+            int n;
             memset(&k, 0, sizeof(k));
-            /* 前七个字段必填，上机状态/时间/地点允许为空 */
-            if (sscanf(line, "%9[^|]|%11[^|]|%11[^|]|%19[^|]|%lf|%lf|%d|%d|%19[^|]|%23[^\n]",
-                       k.id, k.name, k.number, k.pwd, &k.recharge, &k.remain,
-                       &k.state, &k.online, k.start_time, k.address) < 7)
-                continue;
+            k.limit_once = 0;
+            k.limit_day  = 0;
+
+            /* 先按新版 16 字段解析 */
+            n = sscanf(line,
+                       "%9[^|]|%11[^|]|%11[^|]|%19[^|]|%19[^|]|%lf|%lf|%d|%d|%19[^|]|%23[^|]|%lf|%lf|%11[^|]|%lf|%11[^\n]",
+                       k.id, k.name, k.number, k.pwd, k.pay_pwd,
+                       &k.recharge, &k.remain, &k.state, &k.online,
+                       k.start_time, k.address, &k.limit_day, &k.used_day,
+                       k.used_date, &k.limit_once, k.expire);
+            if (n < 16) {
+                /* 回退到旧版 10 字段格式，并补默认交易密码与限额 */
+                memset(&k, 0, sizeof(k));
+                n = sscanf(line,
+                           "%9[^|]|%11[^|]|%11[^|]|%19[^|]|%lf|%lf|%d|%d|%19[^|]|%23[^\n]",
+                           k.id, k.name, k.number, k.pwd, &k.recharge, &k.remain,
+                           &k.state, &k.online, k.start_time, k.address);
+                if (n < 7) continue;
+                snprintf(k.pay_pwd, sizeof(k.pay_pwd), "%s", DEFAULT_PWD);
+                k.limit_day = 50.0;     /* 旧数据给一个合理的默认日限额 */
+                k.limit_once = 20.0;
+            }
+            if (!k.pay_pwd[0]) snprintf(k.pay_pwd, sizeof(k.pay_pwd), "%s", DEFAULT_PWD);
+            if (!k.used_date[0]) now_fmt(k.used_date, sizeof(k.used_date), "%Y-%m-%d");
             g_cards[g_n_card++] = k;
         }
         fclose(fp);
@@ -135,31 +257,28 @@ static int campus_load(void) {
         }
         fclose(fp);
     }
+    load_ledger_seq();
     return g_n_card;
 }
 
-/* 建立三张演示卡片（首次运行） */
+/* 建立演示卡片（首次运行）：三张卡，含限额与不同的交易密码 */
 static void seed_cards(void) {
     static const Card demo[3] = {
-        { "C001", "张三", "B17010101", DEFAULT_PWD, 50.0, 50.0, ST_NORMAL, ONLINE_NO, "", "" },
-        { "C002", "李四", "B17010102", DEFAULT_PWD, 30.0, 30.0, ST_NORMAL, ONLINE_NO, "", "" },
-        { "C003", "王五", "B17010103", DEFAULT_PWD,  0.0,  0.0, ST_NORMAL, ONLINE_NO, "", "" }
+        { "C001", "张三", "B17010101", DEFAULT_PWD, "010101", 50.0, 50.0,
+          ST_NORMAL, ONLINE_NO, "", "", 50.0, 0.0, "", 20.0, "2029-12-31" },
+        { "C002", "李四", "B17010102", DEFAULT_PWD, "010102", 30.0, 30.0,
+          ST_NORMAL, ONLINE_NO, "", "", 30.0, 0.0, "", 15.0, "2029-12-31" },
+        { "C003", "王五", "B17010103", DEFAULT_PWD, "010103",  0.0,  0.0,
+          ST_NORMAL, ONLINE_NO, "", "", 20.0, 0.0, "", 10.0, "2029-12-31" }
     };
-    for (int i = 0; i < 3; i++) g_cards[i] = demo[i];
+    char today[12];
+    now_fmt(today, sizeof(today), "%Y-%m-%d");
+    for (int i = 0; i < 3; i++) {
+        g_cards[i] = demo[i];
+        snprintf(g_cards[i].used_date, sizeof(g_cards[i].used_date), "%s", today);
+    }
     g_n_card = 3;
     campus_save();
-}
-
-/* 确保数据目录存在，不存在则创建一层（跨平台）。
- * dir 目录名。目录已存在或创建成功返回 1 */
-static int ensure_dir(const char *dir) {
-    if (!dir || !*dir) return 1;                /* 空表示当前目录，必然存在 */
-#ifdef _WIN32
-    if (_mkdir(dir) == 0) return 1;             /* Windows：_mkdir 只接一个参数 */
-#else
-    if (mkdir(dir, 0755) == 0) return 1;        /* Linux：权限 0755            */
-#endif
-    return 0;                                   /* 失败通常是已存在，交给上层判断 */
 }
 
 /* 初始化。data_dir 数据目录（不存在会自动创建）。成功返回 1 */
@@ -169,43 +288,54 @@ int campus_init(const char *data_dir) {
     memset(g_income_day, 0, sizeof(g_income_day));
     memset(g_income_amt, 0, sizeof(g_income_amt));
     g_n_card = g_n_income = 0;
+    g_seq = 0;
 
     snprintf(g_dir, sizeof(g_dir), "%s", data_dir ? data_dir : "");
     n = strlen(g_dir);
     while (n > 1 && (g_dir[n - 1] == '/' || g_dir[n - 1] == '\\')) g_dir[--n] = '\0';
 
-    ensure_dir(g_dir);                          /* 首次运行自动建立数据目录 */
-    if (campus_load() == 0) seed_cards();       /* 无数据则建立演示卡片 */
+    ensure_dir(g_dir);
+    if (campus_load() == 0) seed_cards();
     return 1;
 }
 
 /* ---------------- 查询 ---------------- */
-
-/* 卡片总数 */
 int campus_count(void) { return g_n_card; }
 
-/* 取第 i 张卡片；越界返回 NULL */
 Card *campus_at(int i) {
     return (i >= 0 && i < g_n_card) ? &g_cards[i] : NULL;
 }
 
-/* 按卡号查找卡片；找不到返回 NULL */
 Card *campus_find(const char *id) {
     for (int i = 0; i < g_n_card; i++)
         if (!strcmp(g_cards[i].id, id)) return &g_cards[i];
     return NULL;
 }
 
-/* 状态文字 */
 const char *campus_state_text(int state) {
-    static const char *text[3] = { "正常", "挂失", "冻结" };
-    return (state >= 0 && state < 3) ? text[state] : "未知";
+    static const char *text[4] = { "正常", "挂失", "冻结", "已过期" };
+    return (state >= 0 && state < 4) ? text[state] : "未知";
 }
 
-/* 校验学生密码；正确返回 1 */
+const char *campus_type_text(int type) {
+    static const char *text[5] = { "充值", "消费", "退款", "工本费", "补助" };
+    return (type >= 0 && type < 5) ? text[type] : "其他";
+}
+
 int campus_check_pwd(const char *id, const char *pwd) {
     Card *k = campus_find(id);
     return k && !strcmp(k->pwd, pwd);
+}
+
+int campus_check_pay_pwd(const char *id, const char *pwd) {
+    Card *k = campus_find(id);
+    return k && !strcmp(k->pay_pwd, pwd);
+}
+
+int campus_merchants(const char **out, int max) {
+    int n = g_n_merchant < max ? g_n_merchant : max;
+    for (int i = 0; i < n; i++) out[i] = g_merchants[i];
+    return n;
 }
 
 /* 读取某卡上机记录文件，返回条数 */
@@ -234,7 +364,7 @@ int campus_load_records(const char *id, Record *out, int max) {
 /* 统计某卡 [from, 现在] 的上机情况；from 为 0 表示全部 */
 int campus_stats(const char *id, time_t from,
                  int *out_count, int *out_minutes, double *out_cost) {
-    static Record rec[REC_MAX];             /* 静态数组，避免占用栈空间 */
+    static Record rec[REC_MAX];
     int n = campus_load_records(id, rec, REC_MAX);
     int count = 0, minutes = 0;
     double cost = 0.0;
@@ -255,26 +385,188 @@ int campus_stats(const char *id, time_t from,
     return count;
 }
 
-/* ---------------- 业务动作 ---------------- */
+/* 读取交易流水。id 为空表示全部卡；type 为 -1 表示全部类型；
+ * from 为 0 表示不限时间。文件过大时只保留最近 max 条 */
+int campus_load_ledger(const char *id, int type, time_t from,
+                       Transaction *out, int max) {
+    char line[256];
+    FILE *fp = fopen(path_of("ledger.dat"), "r");
+    int n = 0;
 
-/* 登录校验：管理员比对 ADMIN_PWD，学生比对该卡密码。成功返回 1 */
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        Transaction t;
+        int ty = 0;
+        memset(&t, 0, sizeof(t));
+        if (sscanf(line,
+                   "%ld|%19[^|]|%9[^|]|%d|%23[^|]|%lf|%lf|%15[^|]|%31[^\n]",
+                   &t.seq, t.time, t.id, &ty, t.merchant,
+                   &t.amount, &t.balance, t.device, t.memo) < 7)
+            continue;
+        t.type = ty;
+
+        /* 过滤条件 */
+        if (id && *id && strcmp(t.id, id)) continue;
+        if (type >= 0 && t.type != type) continue;
+        if (from) {
+            time_t tt = parse_time(t.time);
+            if (tt != (time_t)-1 && tt < from) continue;
+        }
+        if (n < max) {
+            out[n++] = t;                       /* 未满：顺序写入 */
+        } else {
+            /* 已满：整体前移一条，保留最近 max 条 */
+            memmove(&out[0], &out[1], sizeof(Transaction) * (size_t)(max - 1));
+            out[max - 1] = t;
+        }
+    }
+    fclose(fp);
+    return n;
+}
+
+/* 读取门禁记录。id 为空表示全部卡；同样只保留最近 max 条 */
+int campus_load_access(const char *id, AccessLog *out, int max) {
+    char line[192];
+    FILE *fp = fopen(path_of("access.dat"), "r");
+    int n = 0;
+
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        AccessLog a;
+        memset(&a, 0, sizeof(a));
+        if (sscanf(line, "%9[^|]|%19[^|]|%d|%23[^|]|%d",
+                   a.id, a.time, &a.dir, a.place, &a.kind) < 4)
+            continue;
+        if (id && *id && strcmp(a.id, id)) continue;
+        if (n < max) {
+            out[n++] = a;
+        } else {
+            memmove(&out[0], &out[1], sizeof(AccessLog) * (size_t)(max - 1));
+            out[max - 1] = a;
+        }
+    }
+    fclose(fp);
+    return n;
+}
+
+/* 汇总某卡 [from, 现在] 的消费（只统计 TX_CONSUME） */
+int campus_sum_consume(const char *id, time_t from, double *out_total) {
+    static Transaction tx[LEDGER_MAX];
+    int n = campus_load_ledger(id, TX_CONSUME, from, tx, LEDGER_MAX);
+    double total = 0.0;
+    for (int i = 0; i < n; i++) total += tx[i].amount;
+    if (out_total) *out_total = round2(total);
+    return n;
+}
+
+/* ---------------- 登录与注册 ---------------- */
 int campus_login(const char *id, const char *pwd, int as_admin) {
     if (as_admin) return !strcmp(pwd, ADMIN_PWD);
     return campus_check_pwd(id, pwd);
 }
 
-/* 充值：增加余额与累计充值数额，并记一条收入 */
+/* 新卡注册。交易密码默认取学号末 6 位（不足 6 位则补 DEFAULT_PWD） */
+int campus_register(const char *id, const char *name, const char *number,
+                    const char *pwd, char *err, int esz) {
+    Card *k;
+    if (!id || strlen(id) < 2)       return fail(err, esz, "卡号长度不足");
+    if (campus_find(id))             return fail(err, esz, "该卡号已存在");
+    if (g_n_card >= CARD_MAX)        return fail(err, esz, "已达发卡上限");
+    if (!name || !*name)             return fail(err, esz, "姓名不能为空");
+    if (!number || !*number)         return fail(err, esz, "学号不能为空");
+    if (!pwd || strlen(pwd) < 6)      return fail(err, esz, "登录密码不得少于 6 位");
+
+    k = &g_cards[g_n_card++];
+    memset(k, 0, sizeof(*k));
+    snprintf(k->id, sizeof(k->id), "%s", id);
+    snprintf(k->name, sizeof(k->name), "%s", name);
+    snprintf(k->number, sizeof(k->number), "%s", number);
+    snprintf(k->pwd, sizeof(k->pwd), "%s", pwd);
+    /* 交易密码默认取学号后 6 位 */
+    {
+        size_t ln = strlen(number);
+        const char *src = ln >= 6 ? number + ln - 6 : DEFAULT_PWD;
+        snprintf(k->pay_pwd, sizeof(k->pay_pwd), "%s", src);
+    }
+    k->state = ST_NORMAL;
+    k->online = ONLINE_NO;
+    k->limit_once = 20.0;               /* 默认单笔限额 20 元 */
+    k->limit_day  = 50.0;               /* 默认日累计限额 50 元 */
+    snprintf(k->expire, sizeof(k->expire), "%s", "2029-12-31");
+    now_fmt(k->used_date, sizeof(k->used_date), "%Y-%m-%d");
+    campus_save();
+    return 0;
+}
+
+/* ---------------- 资金动作 ---------------- */
+/* 充值：增加余额与累计充值数额，并记流水 */
 int campus_recharge(Card *card, double amount, char *err, int esz) {
-    if (amount <= 0) return fail(err, esz, "充值金额必须大于 0");
+    if (!card)          return fail(err, esz, "卡片不存在");
+    if (amount <= 0)    return fail(err, esz, "充值金额必须大于 0");
+    if (amount > 10000) return fail(err, esz, "单次充值不得超过 10000 元");
     card->remain   += amount;
     card->recharge += amount;
+    add_tx(card, TX_RECHARGE, "充值", amount, "ADMIN", "管理员充值");
     add_income(amount);
     campus_save();
     return 0;
 }
 
-/* 开始上机：登记开始时间与地点 */
+/* 消费扣款：集中校验状态、交易密码、单笔限额、日累计限额。
+ * merchant 商户名；device 终端号；pay_pwd 交易密码 */
+int campus_pay(Card *card, const char *merchant, double amount,
+               const char *pay_pwd, const char *device, char *err, int esz) {
+    if (!card)                return fail(err, esz, "卡片不存在");
+    if (amount <= 0)          return fail(err, esz, "消费金额必须大于 0");
+    if (!merchant || !*merchant) return fail(err, esz, "商户不能为空");
+
+    /* 1. 卡片状态 */
+    if (check_expire(card))   return fail(err, esz, "卡片已过有效期，请到卡务中心延期");
+    if (card->state == ST_LOST)   return fail(err, esz, "该卡已挂失，无法消费");
+    if (card->state == ST_FROZEN) return fail(err, esz, "该卡已冻结，无法消费");
+
+    /* 2. 交易密码 */
+    if (!campus_check_pay_pwd(card->id, pay_pwd ? pay_pwd : ""))
+        return fail(err, esz, "交易密码错误");
+
+    /* 3. 限额（跨天自动清零） */
+    roll_day(card);
+    if (card->limit_once > 0 && amount > card->limit_once)
+        return fail(err, esz, "超过单笔消费限额");
+    if (card->limit_day > 0 && card->used_day + amount > card->limit_day)
+        return fail(err, esz, "超过当日累计消费限额");
+
+    /* 4. 余额 */
+    if (card->remain < amount)
+        return fail(err, esz, "余额不足，请先充值");
+
+    /* 5. 扣款、累计、记账 */
+    card->remain   = round2(card->remain - amount);
+    card->used_day = round2(card->used_day + amount);
+    add_tx(card, TX_CONSUME, merchant, amount, device, "消费扣款");
+    campus_save();
+    return 0;
+}
+
+/* 退款 / 补助发放：增加余额并记流水（类型由调用方指定） */
+int campus_grant(Card *card, int type, double amount, const char *memo,
+                 char *err, int esz) {
+    if (!card)       return fail(err, esz, "卡片不存在");
+    if (amount <= 0) return fail(err, esz, "金额必须大于 0");
+    if (type != TX_REFUND && type != TX_GRANT)
+        return fail(err, esz, "类型只能是退款或补助");
+    card->remain = round2(card->remain + amount);
+    add_tx(card, type, type == TX_REFUND ? "退款" : "补助", amount,
+           "ADMIN", memo ? memo : "");
+    if (type == TX_GRANT) add_income(amount);
+    campus_save();
+    return 0;
+}
+
+/* ---------------- 机房上机（保留原题目要求） ---------------- */
 int campus_online(Card *card, const char *address, char *err, int esz) {
+    if (!card)                      return fail(err, esz, "卡片不存在");
+    if (check_expire(card))         return fail(err, esz, "卡片已过有效期，不能上机");
     if (card->state == ST_LOST)     return fail(err, esz, "该卡已挂失，不能上机");
     if (card->state == ST_FROZEN)   return fail(err, esz, "该卡已冻结，不能上机");
     if (card->online == ONLINE_YES) return fail(err, esz, "该卡已在上机中");
@@ -293,20 +585,21 @@ static void append_record(const Card *card, const Record *r) {
     char name[32];
     FILE *fp;
     snprintf(name, sizeof(name), "%s.txt", card->id);
-    fp = fopen(path_of(name), "a");         /* 追加：历史记录不被覆盖 */
+    fp = fopen(path_of(name), "a");
     if (!fp) return;
     fprintf(fp, "%s|%s|%s|%d|%.2f|%s|%s\n", r->id, r->date, r->start_time,
             r->duration, r->cost, r->state, r->address);
     fclose(fp);
 }
 
-/* 下机结账：按用时计费、扣余额、写记录并记收入 */
+/* 下机结账：按用时计费、扣余额、写记录、记交易流水与收入 */
 int campus_offline(Card *card, double *out_cost, char *err, int esz) {
     Record r;
     char end_time[20];
     time_t t1, t2;
     double minutes, cost;
 
+    if (!card)                      return fail(err, esz, "卡片不存在");
     if (card->online != ONLINE_YES) return fail(err, esz, "该卡当前未上机");
 
     /* 1. 用时与费用 */
@@ -315,11 +608,10 @@ int campus_offline(Card *card, double *out_cost, char *err, int esz) {
     t2 = parse_time(end_time);
     minutes = (t1 == (time_t)-1) ? 0.0 : difftime(t2, t1) / 60.0;
     if (minutes < 0) minutes = 0;
-    cost = minutes / 60.0 * RATE_PER_HOUR;
-    cost = floor(cost * 100 + 0.5) / 100.0;
+    cost = round2(minutes / 60.0 * RATE_PER_HOUR);
 
     /* 2. 扣费（余额不足则清零，视为欠费） */
-    if (card->remain >= cost) card->remain -= cost;
+    if (card->remain >= cost) card->remain = round2(card->remain - cost);
     else                      card->remain = 0.0;
 
     /* 3. 组装并追加上机记录 */
@@ -333,8 +625,11 @@ int campus_offline(Card *card, double *out_cost, char *err, int esz) {
     snprintf(r.address, sizeof(r.address), "%s", card->address);
     append_record(card, &r);
 
-    /* 4. 记收入并清除上机状态 */
-    add_income(cost);
+    /* 4. 记交易流水与收入，并清除上机状态 */
+    if (cost > 0) {
+        add_tx(card, TX_CONSUME, "机房", cost, "PC-01", "上机结账");
+        add_income(cost);
+    }
     card->online = ONLINE_NO;
     card->start_time[0] = '\0';
     card->address[0] = '\0';
@@ -344,9 +639,10 @@ int campus_offline(Card *card, double *out_cost, char *err, int esz) {
     return 0;
 }
 
-/* 挂失：正在上机则先自动结账，避免费用无上限累积 */
+/* ---------------- 卡务管理 ---------------- */
 int campus_set_lost(Card *card, char *err, int esz) {
     double cost = 0.0;
+    if (!card)                    return fail(err, esz, "卡片不存在");
     if (card->state == ST_LOST)   return fail(err, esz, "该卡已处于挂失状态");
     if (card->state == ST_FROZEN) return fail(err, esz, "该卡已冻结，不能挂失");
     if (card->online == ONLINE_YES) campus_offline(card, &cost, NULL, 0);
@@ -355,26 +651,129 @@ int campus_set_lost(Card *card, char *err, int esz) {
     return 0;
 }
 
-/* 重置学生密码为默认值，并解除冻结（挂失状态保持不变） */
+int campus_unlost(Card *card, char *err, int esz) {
+    if (!card)                  return fail(err, esz, "卡片不存在");
+    if (card->state != ST_LOST) return fail(err, esz, "该卡当前不是挂失状态");
+    card->state = ST_NORMAL;
+    campus_save();
+    return 0;
+}
+
+int campus_freeze(Card *card, int on, char *err, int esz) {
+    if (!card) return fail(err, esz, "卡片不存在");
+    if (on) {
+        double cost = 0.0;
+        if (card->state == ST_FROZEN) return fail(err, esz, "该卡已冻结");
+        if (card->online == ONLINE_YES) campus_offline(card, &cost, NULL, 0);
+        card->state = ST_FROZEN;
+    } else {
+        if (card->state != ST_FROZEN && card->state != ST_EXPIRED)
+            return fail(err, esz, "该卡当前不是冻结状态");
+        card->state = ST_NORMAL;
+    }
+    campus_save();
+    return 0;
+}
+
 int campus_reset_pwd(Card *card, char *err, int esz) {
     (void)err; (void)esz;
+    if (!card) return -1;
     snprintf(card->pwd, sizeof(card->pwd), "%s", DEFAULT_PWD);
     if (card->state == ST_FROZEN) card->state = ST_NORMAL;
     campus_save();
     return 0;
 }
 
-/* 学生修改密码：校验原密码，新密码不少于 6 位 */
+int campus_reset_pay_pwd(Card *card, char *err, int esz) {
+    if (!card) return fail(err, esz, "卡片不存在");
+    snprintf(card->pay_pwd, sizeof(card->pay_pwd), "%s", DEFAULT_PWD);
+    campus_save();
+    return 0;
+}
+
+/* 补办新卡：收工本费、解除挂失、保留余额 */
+int campus_reissue(Card *card, double fee, char *err, int esz) {
+    if (!card)             return fail(err, esz, "卡片不存在");
+    if (fee < 0)           return fail(err, esz, "工本费不能为负");
+    if (card->remain < fee) return fail(err, esz, "余额不足以支付工本费");
+
+    if (fee > 0) {
+        card->remain = round2(card->remain - fee);
+        add_tx(card, TX_FEE, "卡务中心", fee, "ADMIN", "补办工本费");
+        add_income(fee);
+    }
+    card->state = ST_NORMAL;                /* 补办后解除挂失 */
+    snprintf(card->pay_pwd, sizeof(card->pay_pwd), "%s", DEFAULT_PWD);
+    /* 实物卡换了，上机状态一并清除 */
+    card->online = ONLINE_NO;
+    card->start_time[0] = '\0';
+    card->address[0] = '\0';
+    campus_save();
+    return 0;
+}
+
+int campus_set_expire(Card *card, const char *date, char *err, int esz) {
+    if (!card) return fail(err, esz, "卡片不存在");
+    if (!date || strlen(date) != 10 || date[4] != '-' || date[7] != '-')
+        return fail(err, esz, "日期格式应为 YYYY-MM-DD");
+    snprintf(card->expire, sizeof(card->expire), "%s", date);
+    /* 延期后若仍在有效期内，把过期状态改回正常 */
+    if (card->state == ST_EXPIRED) {
+        char today[12];
+        now_fmt(today, sizeof(today), "%Y-%m-%d");
+        if (strcmp(today, date) <= 0) card->state = ST_NORMAL;
+    }
+    campus_save();
+    return 0;
+}
+
+int campus_set_limits(Card *card, double limit_once, double limit_day,
+                      char *err, int esz) {
+    if (!card)          return fail(err, esz, "卡片不存在");
+    if (limit_once < 0 || limit_day < 0)
+        return fail(err, esz, "限额不能为负");
+    if (limit_day > 0 && limit_once > limit_day)
+        return fail(err, esz, "单笔限额不能大于日累计限额");
+    card->limit_once = round2(limit_once);
+    card->limit_day  = round2(limit_day);
+    campus_save();
+    return 0;
+}
+
 int campus_change_pwd(Card *card, const char *old_pwd, const char *new_pwd,
                       char *err, int esz) {
-    if (strcmp(card->pwd, old_pwd)) return fail(err, esz, "原密码错误");
-    if (strlen(new_pwd) < 6)        return fail(err, esz, "新密码不得少于 6 位");
+    if (!card)                          return fail(err, esz, "卡片不存在");
+    if (strcmp(card->pwd, old_pwd))     return fail(err, esz, "原登录密码错误");
+    if (strlen(new_pwd) < 6)            return fail(err, esz, "新密码不得少于 6 位");
     snprintf(card->pwd, sizeof(card->pwd), "%s", new_pwd);
     campus_save();
     return 0;
 }
 
-/* 当天收入：逐卡读上机记录，按日期等于今天累加 */
+int campus_change_pay_pwd(Card *card, const char *old_pwd, const char *new_pwd,
+                          char *err, int esz) {
+    if (!card)                          return fail(err, esz, "卡片不存在");
+    if (strcmp(card->pay_pwd, old_pwd)) return fail(err, esz, "原交易密码错误");
+    if (strlen(new_pwd) < 6)            return fail(err, esz, "新交易密码不得少于 6 位");
+    snprintf(card->pay_pwd, sizeof(card->pay_pwd), "%s", new_pwd);
+    campus_save();
+    return 0;
+}
+
+/* ---------------- 门禁 / 考勤 ---------------- */
+int campus_access(Card *card, int dir, int kind, const char *place,
+                  char *err, int esz) {
+    if (!card)                    return fail(err, esz, "卡片不存在");
+    if (check_expire(card))       return fail(err, esz, "卡片已过有效期");
+    if (card->state == ST_LOST)   return fail(err, esz, "该卡已挂失");
+    if (card->state == ST_FROZEN) return fail(err, esz, "该卡已冻结");
+    if (!place || !*place)        return fail(err, esz, "请提供门禁地点");
+    add_access(card, dir, kind, place);
+    return 0;
+}
+
+/* ---------------- 报表 ---------------- */
+/* 当天收入：上机费合计与上机人次（保留原题目要求的口径） */
 void campus_today_income(double *out_fee, int *out_times) {
     char today[12];
     int times = 0;
@@ -390,6 +789,52 @@ void campus_today_income(double *out_fee, int *out_times) {
             times++;
         }
     }
-    if (out_fee)   *out_fee = fee;
+    if (out_fee)   *out_fee = round2(fee);
     if (out_times) *out_times = times;
+}
+
+/* 当天全站汇总：消费总额、消费笔数、充值总额，以及各商户消费额 */
+void campus_today_report(double *out_consume, int *out_times,
+                         double *out_recharge, double merchant_sum[]) {
+    static Transaction tx[LEDGER_MAX];
+    char today[12];
+    time_t from;
+    int n;
+    double consume = 0.0, recharge = 0.0;
+    int times = 0;
+
+    /* 以今天 00:00 为起点过滤流水 */
+    {
+        time_t now = time(NULL);
+        struct tm tm = *localtime(&now);
+        tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0; tm.tm_isdst = -1;
+        from = mktime(&tm);
+    }
+    now_fmt(today, sizeof(today), "%Y-%m-%d");
+
+    if (merchant_sum) {
+        for (int i = 0; i < MERCHANT_MAX; i++) merchant_sum[i] = 0.0;
+    }
+
+    n = campus_load_ledger(NULL, -1, from, tx, LEDGER_MAX);
+    for (int i = 0; i < n; i++) {
+        if (strncmp(tx[i].time, today, 10)) continue;      /* 双重保险 */
+        if (tx[i].type == TX_CONSUME) {
+            consume += tx[i].amount;
+            times++;
+            if (merchant_sum) {
+                for (int m = 0; m < g_n_merchant; m++) {
+                    if (!strcmp(tx[i].merchant, g_merchants[m])) {
+                        merchant_sum[m] += tx[i].amount;
+                        break;
+                    }
+                }
+            }
+        } else if (tx[i].type == TX_RECHARGE || tx[i].type == TX_GRANT) {
+            recharge += tx[i].amount;
+        }
+    }
+    if (out_consume)  *out_consume = round2(consume);
+    if (out_times)    *out_times = times;
+    if (out_recharge) *out_recharge = round2(recharge);
 }
