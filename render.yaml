@@ -1,0 +1,16 @@
+# ============================================================
+#  Render 部署蓝图（Blueprint）
+#  用法：Render 控制台 → New + → Blueprint → 选择本仓库，即可自动按本文件创建服务
+#  说明：容器内服务自动监听 0.0.0.0:$PORT（PORT 由平台注入）
+# ============================================================
+services:
+  - type: web
+    name: campus-card
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free                    # 免费实例：闲置 15 分钟会休眠，仓库内 keepalive 工作流负责唤醒
+    healthCheckPath: /api/health  # 健康检查端点
+    autoDeploy: true              # 推送到 main 分支后自动重新部署
+    envVars:
+      - key: PORT
+        value: 8090               # 平台通常会覆盖此值，这里仅作默认

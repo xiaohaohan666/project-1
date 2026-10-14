@@ -1,0 +1,35 @@
+name: keepalive
+
+# 免费容器平台（如 Render）会在闲置约 15 分钟后休眠 Web 服务，
+# 下次访问需要约 1 分钟冷启动。本工作流定时探活，让它保持清醒，
+# 保证老师/同学点开链接即可立即使用。
+#
+# 使用前：在仓库 Settings → Secrets and variables → Actions → Variables
+#        新建变量 APP_URL，值为已部署的网址（如 https://xxx.onrender.com）
+on:
+  schedule:
+    - cron: '*/10 * * * *'      # 每 10 分钟一次（小于休眠阈值 15 分钟）
+  workflow_dispatch:            # 也支持手动触发
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 探活
+        run: |
+          URL="${{ vars.APP_URL }}"
+          if [ -z "$URL" ]; then
+            echo "尚未配置 APP_URL 变量，跳过探活"
+            exit 0
+          fi
+          echo "探活目标: $URL"
+          for i in 1 2 3; do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 "$URL/api/health" || true)
+            echo "第 $i 次: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "服务在线"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "服务未响应（可能正在冷启动，下次再试）"
