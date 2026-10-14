@@ -1,7 +1,0 @@
-﻿build #10  completed/failure  2e63e5f
-  https://github.com/xiaohaohan666/project-1/actions/runs/38497462503
-  作业: 编译（Linux / gcc） -> failure
-     [failure] 命令行版冒烟测试（学生上机 + 下机结账）
-     [skipped] Web 服务冒烟测试（健康检查 / 登录 / 充值）
-  作业: 编译（Windows / MinGW） -> success
-     （全部步骤通过）
