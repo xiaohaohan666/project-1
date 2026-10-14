@@ -1,5 +1,0 @@
-﻿build #8 失败作业: ['编译（Linux / gcc）']
-尝试: https://github.com/xiaohaohan666/project-1/actions/runs/38497237325/logs
-  HTTP 404
-尝试: https://api.github.com/repos/xiaohaohan666/project-1/actions/runs/38497237325/logs
-  HTTP 403

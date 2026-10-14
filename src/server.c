@@ -646,7 +646,7 @@ int main(int argc, char **argv) {
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((u_short)port);
+    addr.sin_port = htons((unsigned short)port);
     addr.sin_addr.s_addr = inet_addr(host);
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) == SOCKET_ERROR) {
         printf("端口 %d 绑定失败\n", port);
