@@ -1,6 +1,7 @@
 name: probe
 
-# 临时诊断：在 Linux 上编译，并把完整报错写入工作流摘要（公开可读）
+# 临时诊断：把 Web 服务的编译拆成若干独立步骤，
+# 哪一步失败即定位到具体代码区域（步骤名可公开读取，无需认证）
 on:
   push:
     branches: [ main ]
@@ -10,21 +11,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: gcc --version | head -1
 
-      - name: 编译并抓取报错
+      # 整体编译：先确定是否真的失败
+      - name: A. 整体编译 server.c
+        run: gcc -std=c11 -Wall -Wextra -O2 -Isrc src/server.c src/campus.c -o /tmp/srv
+
+      # 仅做语法检查（不链接），可区分「编译错误」与「链接错误」
+      - name: B. 仅编译不链接 (-c)
+        run: gcc -std=c11 -Wall -Wextra -O2 -Isrc -c src/server.c -o /tmp/srv.o
+
+      # 排除业务层问题
+      - name: C. 单独编译 campus.c
+        run: gcc -std=c11 -Wall -Wextra -O2 -Isrc -c src/campus.c -o /tmp/cam.o
+
+      # 只保留标准库，排除平台适配段
+      - name: D. 预处理统计平台分支
         run: |
-          set +e
-          LOG=$(gcc -std=c11 -Wall -Wextra -O2 -Isrc src/server.c src/campus.c -o /tmp/srv 2>&1)
-          RC=$?
-          {
-            echo "### probe: gcc exit code = $RC"
-            echo '```'
-            echo "$LOG" | head -c 20000
-            echo '```'
-            echo "### 关键信息"
-            echo '```'
-            grep -c . src/server.c
-            grep -n "_strnicmp\|ci_ncmp" src/server.c | head -20
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "RC=$RC"
+          gcc -std=c11 -Isrc -E src/server.c -o /tmp/srv.i
+          echo "预处理完成"
+          grep -n "sock_init\|sock_close\|ci_ncmp\|header_value" /tmp/srv.i | head -10
+
+      # 只编译网络适配 + 主函数骨架，看是否 POSIX 侧有问题
+      - name: E. 强制走 POSIX 分支编译
+        run: |
+          gcc -std=c11 -Wall -Wextra -O2 -Isrc -U_WIN32 -c src/server.c -o /tmp/srv2.o
