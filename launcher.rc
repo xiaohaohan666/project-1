@@ -1,6 +1,0 @@
-/* 校园一卡通桌面应用的 Windows 资源
- * 用 windres 编译成 .o 后与 launcher.c 一起链接，
- * 使 exe 在资源管理器与任务栏显示自定义图标。
- * 图标文件名保持 ASCII：windres 无法处理非 ASCII 路径。
- * 图标 id 固定为 1，launcher.c 用 LoadIconW(inst, MAKEINTRESOURCEW(1)) 取。 */
-1 ICON "campus.ico"

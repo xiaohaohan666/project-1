@@ -24,7 +24,7 @@
 #include <time.h>
 
 #ifdef _WIN32
-#  include <windows.h>            /* SetConsoleOutputCP：让控制台按 UTF-8 显示中文 */
+#  include <windows.h>            /* 设置控制台输入/输出代码页为 UTF-8 */
 #  include <conio.h>              /* _getch：读取密码时不回显                       */
 #  include <io.h>                 /* _isatty                                        */
 #  define isatty _isatty          /* 统一为 POSIX 名称，便于跨平台                  */
@@ -71,9 +71,70 @@ static int read_line(const char *prompt, char *buf, int size) {
     return 1;
 }
 
+/* ---------------- 输入编码处理 ----------------
+ *
+ * 控制台的中文有两种编码来源，必须统一成 UTF-8，否则存盘后再读出来就是乱码：
+ *   · 交互输入：控制台代码页决定。main() 里已设成 UTF-8(65001)，
+ *               所以光标下敲的中文进到缓冲区就是 UTF-8。
+ *   · 管道/重定向输入：命令行工具（如 cmd 的重定向）可能给的是
+ *               GBK(936) 字节，这时需要自己转成 UTF-8。
+ *
+ * 判断依据是「是不是合法 UTF-8」：
+ *   GBK 的双字节中，次字节往往落在 0x40-0x7E 或 0x80-0xFE，
+ *   与 UTF-8 续字节必须是 0x80-0xBF 的约束冲突，因此能可靠区分。
+ * 纯 ASCII 在两种编码下一致，直接放行。
+ */
+#ifdef _WIN32
+
+/* 判断是否为合法 UTF-8 */
+static int is_valid_utf8(const char *s) {
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if (*p < 0x80) { p++; continue; }
+        if ((*p & 0xE0) == 0xC0) {
+            if ((p[1] & 0xC0) != 0x80) return 0;
+            /* 拒绝过长编码（C0/C1 开头） */
+            if (*p < 0xC2) return 0;
+            p += 2;
+        } else if ((*p & 0xF0) == 0xE0) {
+            if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80) return 0;
+            p += 3;
+        } else if ((*p & 0xF8) == 0xF0) {
+            if ((p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80 ||
+                (p[3] & 0xC0) != 0x80) return 0;
+            p += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* 把 GBK 字节转成 UTF-8。已经是 UTF-8 或纯 ASCII 时原样返回 */
+static void to_utf8(char *s) {
+    wchar_t w[512];
+    char out[1024];
+    int n, m;
+
+    if (!s || !*s) return;
+    if (is_valid_utf8(s)) return;
+
+    /* 按系统 ANSI 代码页（中文 Windows 是 GBK）解读 */
+    n = MultiByteToWideChar(CP_ACP, 0, s, -1, w, 512);
+    if (n <= 0) return;
+    m = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, sizeof(out), NULL, NULL);
+    if (m <= 0) return;
+    snprintf(s, strlen(s) + strlen(out) + 1, "%s", out);
+}
+
+#endif /* _WIN32 */
+
 /* 必须读到一行文本：读不到（输入结束）直接退出，避免死循环 */
 static void ask_text(const char *prompt, char *buf, int size) {
     if (!read_line(prompt, buf, size)) exit(0);
+#ifdef _WIN32
+    to_utf8(buf);              /* 统一成 UTF-8，避免存盘后乱码 */
+#endif
 }
 
 /* 读取整数。成功返回 1，格式错误返回 0 */
@@ -162,7 +223,7 @@ static int menu(const char *head, const char *extra, const MenuItem *items, int 
 
 /* 按卡号选择卡片。找不到时提示原因并返回 NULL */
 static Card *pick_card(const char *prompt) {
-    char id[10];
+    char id[32];              /* 卡号输入缓冲，放大更稳妥 */
     Card *card;
     ask_text(prompt, id, sizeof(id));
     card = campus_find(id);
@@ -573,7 +634,13 @@ static int admin_login(void) {
 
 /* 新卡注册：学生自设登录密码，交易密码默认取学号后 6 位 */
 static void card_register(void) {
-    char id[10], name[12], number[12], pwd1[20], pwd2[20];
+    /* 输入缓冲区刻意比目标字段大（姓名字段 24 字节，这里给 64）。
+     * 若缓冲区正好等于字段大小，fgets 读满时会把多字节汉字砍断，
+     * 产生非法 UTF-8；放大后由 campus_register 的 copy_trim 按字符
+     * 边界安全截断。曾因 name[12] 恰好在「欧阳梓萱」（UTF-8 正好
+     * 12 字节）处被砍断而出错——GBK 下同样内容只要 8 字节，
+     * 所以这个 bug 只在 UTF-8 输入下暴露。 */
+    char id[32], name[64], number[32], pwd1[32], pwd2[32];
     char err[64];
 
     clear_screen();
@@ -610,7 +677,7 @@ static void card_register(void) {
 
 /* 通用消费处理。merchant 商户名；device 终端号 */
 static void do_pay(const char *merchant, const char *device) {
-    char id[10];
+    char id[32];              /* 卡号输入缓冲，放大更稳妥 */
     Card *card;
     double amount;
     char err[64];
@@ -645,7 +712,7 @@ static void do_pay(const char *merchant, const char *device) {
 
 /* 机房按小时自助上机（属于一卡通消费点之一） */
 static void merchant_machine(void) {
-    char id[10];
+    char id[32];              /* 卡号输入缓冲，放大更稳妥 */
     Card *card;
     char err[64];
 
@@ -876,7 +943,7 @@ static void admin_set_limits(void) {
 /* 卡片延期 */
 static void admin_set_expire(void) {
     Card *card;
-    char date[12], err[64];
+    char date[32], err[64];   /* 输入缓冲放大，避免 fgets 砍断多字节字符 */
 
     clear_screen();
     printf("---------------- 卡片延期 ----------------\n");
@@ -900,7 +967,7 @@ static void admin_grant(void) {
     };
     Card *card;
     double amount;
-    char memo[32], err[64];
+    char memo[64], err[64];   /* 备注可能含中文，放大后由 copy_trim 安全截断 */
     int c = menu("退款与补助", NULL, items, 2);
 
     if (c == 0) return;
@@ -1019,7 +1086,7 @@ static void report_ledger(void) {
     if (c == 1) {
         show_ledger(NULL, -1, 30);
     } else {
-        char id[10];
+        char id[32];              /* 卡号输入缓冲，放大更稳妥 */
         ask_text("请输入卡号：", id, sizeof(id));
         if (!campus_find(id)) {
             printf("找不到该卡号！\n");
@@ -1160,6 +1227,11 @@ int main(void) {
     };
 
 #ifdef _WIN32
+    /* 输入与输出都设成 UTF-8。
+     * 只设输出是不够的：控制台默认输入代码页是 GBK(936)，
+     * 那样光标下敲的中文会以 GBK 字节进入缓冲区，与内部统一使用的
+     * UTF-8 冲突，存盘后再读出来就是乱码。 */
+    SetConsoleCP(65001);
     SetConsoleOutputCP(65001);
 #endif
     campus_init("data");

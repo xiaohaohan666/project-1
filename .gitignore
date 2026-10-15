@@ -1,51 +1,12 @@
-# ---- 编译产物 ----
-*.exe
-*.o
-*.obj
-*.dll
-a.out
-
-# ---- 运行时数据（卡片与上机记录，属个人数据不入库）----
+# 运行时数据：由程序自动生成，不入库
 data/
-!data/.gitkeep
 
-# ---- 编辑器和系统 ----
-.vscode/*
-!.vscode/tasks.json
-.idea/
-*.swp
-.DS_Store
-Thumbs.db
-
-# ---- 临时文件 ----
-*.tmp
-*.log
-lhr.log
-run/
-
-# ---- 各类私钥，切勿入库 ----
-.ssh/
-tunnelkey
-tunnelkey.pub
-known_hosts_tunnel
-githubkey
-githubkey.pub
-known_hosts*
-*_key
-id_ed25519*
-id_rsa*
-
-# ---- 题目原件（含出题人姓名，不纳入公开仓库）----
-*.pdf
-
-
-# ---- Python 缓存 ----
-__pycache__/
-*.pyc
-
-# ---- 测试与构建临时目录 ----
-.uitest/
-.vendor/
-.accept/
-.tmp/
+# 构建中间产物（正式产物 main.exe 会入库，便于直接运行）
 *.o
+test_jstr.exe
+
+# 编辑器与系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
