@@ -23,6 +23,22 @@
             "detail": "源码为 UTF-8，必须带 -fexec-charset=UTF-8，否则中文乱码。"
         },
         {
+            "label": "C: 构建桌面应用 校园一卡通.exe",
+            "type": "shell",
+            "command": "gcc",
+            "args": [
+                "-std=c11", "-Wall", "-Wextra", "-O2",
+                "-mwindows",
+                "-fexec-charset=UTF-8",
+                "src/launcher.c",
+                "-o", "校园一卡通.exe",
+                "-lcomctl32", "-lgdi32", "-luser32", "-lws2_32", "-lshell32"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"],
+            "detail": "-mwindows 表示 GUI 子系统：双击不弹控制台窗口。"
+        },
+        {
             "label": "运行: 启动模拟校园卡系统",
             "type": "shell",
             "command": "${workspaceFolder}/main.exe",

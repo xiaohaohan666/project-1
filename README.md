@@ -273,3 +273,39 @@ python tools/stress.py http://127.0.0.1:8091 # 容量、性能、边界条件
 python tools/capacity.py http://127.0.0.1:8092 300 30832   # 超上限行为
 python tools/verify_parse.py http://127.0.0.1:8091 big/data  # 字段解析对照原始文件
 ```
+## 附三：桌面应用（纯 C + Win32）
+
+`src/launcher.c` 编译出一个**真正的 Windows 桌面程序**，双击即用：
+
+```bash
+gcc -std=c11 -Wall -Wextra -O2 -mwindows -fexec-charset=UTF-8 src/launcher.c \
+    -o 校园一卡通.exe -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32
+```
+
+`-mwindows` 让 PE 子系统为 GUI：双击不弹黑色控制台窗口。
+
+双击 `校园一卡通.exe` 后：
+
+1. 静默启动同目录的 `server.exe`（`CREATE_NO_WINDOW`，无控制台）
+2. 自动用 Edge/Chrome 的「应用模式」打开界面
+   （独立窗口、无地址栏、无标签页；找不到浏览器则退化为默认浏览器）
+3. 窗口显示服务状态、卡片数、费率，以及本机/局域网地址
+4. 通过前端心跳判断界面是否关闭
+5. 关闭窗口即停止后端，不残留进程
+
+窗口按钮：**打开界面**（应用模式）、**浏览器标签页**、**复制手机地址**、**退出**。
+
+自检（不需要窗口，用控制台版编译后运行）：
+
+```bash
+gcc -std=c11 -O2 -fexec-charset=UTF-8 src/launcher.c -o launcher_test.exe \
+    -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32
+./launcher_test.exe --selftest
+```
+
+自检会依次验证：取局域网 IP、探测浏览器、启动后端、等待就绪、
+读取健康信息、心跳收发、停止并确认无残留进程。
+
+> 除桌面应用外还保留两个不依赖编译的启动方式：
+> `start.bat`（纯 ASCII，双击启动并用默认浏览器打开）与
+> `校园一卡通.pyw`（Python 版，界面更完整，含运行日志）。
