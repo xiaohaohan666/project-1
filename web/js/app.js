@@ -567,6 +567,16 @@
     }
   }
 
+  /* 心跳：告诉本地桌面启动器「应用窗口还开着」。
+   * 只在页面可见时发送；窗口关闭后心跳自然停止，启动器据此退出并停止服务。
+   * 直接 fetch 而不经 API 封装：心跳失败不应弹出任何错误提示。 */
+  function heartbeat() {
+    if (document.hidden) return;
+    fetch('/api/beat', { cache: 'no-store' }).catch(() => {});
+  }
+  heartbeat();
+  setInterval(heartbeat, 4000);
+
   /* 页面重新可见时自动刷新，保证多端数据一致 */
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && !$('#app').classList.contains('hidden')) refresh();

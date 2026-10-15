@@ -51,6 +51,10 @@ static void sock_cleanup(void) { }
 #define RES_MAX (512 * 1024)
 
 static char g_web[256] = "web";
+/* 最近一次收到前端心跳的时间（time_t）。桌面启动器靠它判断
+ * 应用窗口是否还开着：窗口关了就没人发心跳了。
+ * 0 表示从未收到过心跳（例如只用命令行版时）。 */
+static time_t g_last_beat;
 
 /* ============================================================
  *                    JSON 输出小工具
@@ -679,6 +683,19 @@ static void route(const char *method, const char *path, const char *query,
     q_get(query, "payPwd", pay, sizeof(pay));
     if (!*pay) snprintf(pay, sizeof(pay), "%s", pay_hdr);
 
+    /* 前端定时调用，让桌面启动器感知应用窗口是否仍然打开 */
+    if (!strcmp(path, "/api/beat")) {
+        g_last_beat = time(NULL);
+        j_put("{\"ok\":true}");
+        return;
+    }
+    /* 启动器查询：距上次心跳过去多少秒；从未收到过则为 -1 */
+    if (!strcmp(path, "/api/beat/age")) {
+        j_put("{\"ok\":true,");
+        kv_i("age", g_last_beat ? (long)(time(NULL) - g_last_beat) : -1L);
+        j_put("}");
+        return;
+    }
     if (!strcmp(path, "/api/health")) {
         j_put("{\"ok\":true,\"service\":\"campus-card\"");
         j_fmt(",\"cards\":%d,\"rate\":%.2f", campus_count(), RATE_PER_HOUR);
