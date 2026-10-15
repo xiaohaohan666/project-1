@@ -25,7 +25,8 @@ window.PWA = (() => {
       return;
     }
     try {
-      const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      /* 用相对路径注册，兼容子路径部署（如 GitHub Pages 的 /project-1/） */
+      const reg = await navigator.serviceWorker.register('sw.js');
       /* 有新版本时静默更新，下次进入即为新版 */
       reg.addEventListener('updatefound', () => {
         const sw = reg.installing;
@@ -36,7 +37,7 @@ window.PWA = (() => {
           }
         });
       });
-      console.info('[PWA] Service Worker 已注册');
+      console.info('[PWA] Service Worker 已注册，作用域:', reg.scope);
     } catch (e) {
       console.warn('[PWA] Service Worker 注册失败：', e.message);
     }

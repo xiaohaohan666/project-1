@@ -280,3 +280,6 @@ body.is-offline .card-visual { filter: grayscale(.35); }
   margin-bottom: 12px; line-height: 1.6;
 }
 .mb8 { margin-bottom: 8px; }
+
+/* 登录页底部链接之间的分隔点 */
+.dot { color: var(--muted); margin: 0 6px; }

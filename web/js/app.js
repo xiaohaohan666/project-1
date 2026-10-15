@@ -61,6 +61,33 @@
   };
   $('#btnAdminTip').onclick = () => $$('#loginTabs .tab')[1].click();
 
+  /* ---------------- 服务器地址设置 ---------------- */
+  /* 前端可部署在静态托管（如 GitHub Pages），此时接口在另一台服务器上，
+   * 需要让用户填写后端地址；若由 C 服务同时托管页面与接口则留空即可 */
+  $('#btnSettings').onclick = async () => {
+    const v = await prompt({
+      title: '设置服务器地址',
+      fields: [{
+        name: 'apiBase',
+        label: '后端地址（留空表示与页面同源）',
+        placeholder: '例如 https://xxxx.lhr.life'
+      }],
+      confirmLabel: '保存并测试'
+    });
+    if (!v) return;
+    API.setApiBase(v.apiBase);
+    try {
+      const h = await API.health();
+      ok(`连接成功：${h.cards} 张卡，机房费率 ${money(h.rate)} 元/小时`);
+      $('#loginHint').classList.remove('error');
+      $('#loginHint').textContent = HINTS[role];
+    } catch (ex) {
+      const hint = $('#loginHint');
+      hint.textContent = '连接失败：' + ex.message;
+      hint.classList.add('error');
+    }
+  };
+
   /* ---------------- 视图切换 ---------------- */
   function switchView(name) {
     state.view = name;
@@ -532,6 +559,11 @@
       $('#btnOnline')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     } else if (action === 'stats') {
       switchView('student-stats');
+    } else if (action === 'pay') {
+      switchView('student-consume');
+      $('#inPayAmount')?.focus();
+    } else if (action === 'ledger') {
+      switchView('student-ledger');
     }
   }
 

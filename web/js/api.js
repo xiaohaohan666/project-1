@@ -3,14 +3,27 @@
  *  身份通过请求头 X-Token（卡号或 ADMIN）与 X-Pwd（密码）携带，
  *  消费类请求额外携带交易密码 X-PayPwd。
  *  服务端每次校验，因此刷新页面、多端同时用都不需要服务端会话。
+ *
+ *  后端地址可配置：前端既可被同一个 C 服务托管（默认同源），
+ *  也可部署在静态托管（如 GitHub Pages）而把接口指向另一台服务器。
+ *  地址保存在 localStorage，用户可在「设置」中修改。
  * ============================================================ */
 const API = (() => {
   const K_TOK = 'campus.token';
   const K_PWD = 'campus.pwd';
   const K_PAY = 'campus.paypwd';
+  const K_API = 'campus.apiBase';
   let token = localStorage.getItem(K_TOK) || '';
   let pwd   = localStorage.getItem(K_PWD) || '';
   let payPwd = localStorage.getItem(K_PAY) || '';
+  /* 默认同源：由 C 服务同时托管页面与接口时无需配置 */
+  let base = localStorage.getItem(K_API) || '';
+
+  /* 拼接完整地址。path 以 / 开头 */
+  function url(path) {
+    if (!base) return path;
+    return base.replace(/\/+$/, '') + path;
+  }
 
   /* 统一请求。path 路径；method 方法；body 请求体对象 */
   async function req(path, method = 'GET', body = null) {
@@ -22,12 +35,14 @@ const API = (() => {
 
     let res;
     try {
-      res = await fetch(path, {
+      res = await fetch(url(path), {
         method, headers,
         body: body ? JSON.stringify(body) : undefined
       });
     } catch (e) {
-      throw new Error(navigator.onLine ? '无法连接服务，请确认后端已启动' : '当前离线，请联网后重试');
+      throw new Error(navigator.onLine
+        ? '无法连接服务，请检查「设置」中的服务器地址'
+        : '当前离线，请联网后重试');
     }
     let data;
     try { data = await res.json(); } catch (e) { throw new Error('服务返回异常'); }
@@ -40,6 +55,13 @@ const API = (() => {
   return {
     get token() { return token; },
     get payPwd() { return payPwd; },
+    /* 后端地址（空表示同源） */
+    get apiBase() { return base; },
+    setApiBase(v) {
+      base = (v || '').trim().replace(/\/+$/, '');
+      if (base) localStorage.setItem(K_API, base);
+      else localStorage.removeItem(K_API);
+    },
     /* 登录成功后保存身份 */
     setAuth(t, p) {
       token = t || ''; pwd = p || '';
@@ -63,7 +85,8 @@ const API = (() => {
     card:        ()                => get('/api/card'),
     records:     ()                => get('/api/records'),
     stats:       (period)          => get('/api/stats?period=' + period),
-    ledger:      (period)          => get('/api/ledger?period=' + period),
+    ledger:      (period, offset)  => get('/api/ledger?period=' + period +
+                                          '&offset=' + (offset || 0)),
     consume:     (period)          => get('/api/consume?period=' + period),
     /* 消费：交易密码可显式传入，否则用本地保存的 */
     pay:         (merchant, amount, p) =>
@@ -83,10 +106,11 @@ const API = (() => {
     cards:       ()                => get('/api/admin/cards'),
     income:      ()                => get('/api/admin/income'),
     report:      ()                => get('/api/admin/report'),
-    admLedger:   (period)          => get('/api/admin/ledger?period=' + period),
+    admLedger:   (period, offset)  => get('/api/admin/ledger?period=' + period +
+                                          '&offset=' + (offset || 0)),
     admRecords:  (id)              => get('/api/admin/records?id=' + encodeURIComponent(id)),
-    admAccess:   (id)              => get('/api/admin/access?id=' + encodeURIComponent(id)),
-    /* 卡务操作：op 为 recharge/lost/unlost/freeze/reset/resetpay/reissue/limits/expire/grant */
+    admAccess:   (id)              => get('/api/admin/access?id=' + encodeURIComponent(id || '')),
+    /* 卡务操作：op 为 recharge/lost/unlost/freeze/reset/resetpay/reissue/limits/expire/grant/pay */
     adminOp:     (op, body)        => post('/api/admin/' + op, body)
   };
 })();

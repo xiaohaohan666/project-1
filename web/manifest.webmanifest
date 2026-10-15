@@ -1,11 +1,11 @@
 {
-  "name": "模拟校园卡 · 机房上机计费",
-  "short_name": "校园卡",
-  "description": "机房上机计费与消费记录查询系统：上机登记、按时计费、挂失冻结、上机统计与当天收入报表。",
+  "name": "校园一卡通 · 消费与机房上机",
+  "short_name": "一卡通",
+  "description": "校园一卡通：食堂、超市、文印、热水洗衣、宿舍水电、图书馆罚款消费，机房上机计费，门禁考勤与交易流水查询。",
   "lang": "zh-CN",
   "dir": "ltr",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui", "browser"],
   "orientation": "any",
@@ -34,15 +34,21 @@
   ],
   "shortcuts": [
     {
-      "name": "上机登记",
-      "short_name": "上机",
-      "url": "/?action=online",
+      "name": "扫码消费",
+      "short_name": "消费",
+      "url": "./?action=pay",
       "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
     },
     {
-      "name": "上机统计",
-      "short_name": "统计",
-      "url": "/?action=stats",
+      "name": "机房上机",
+      "short_name": "上机",
+      "url": "./?action=online",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "交易流水",
+      "short_name": "流水",
+      "url": "./?action=ledger",
       "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
     }
   ]
