@@ -1,47 +1,37 @@
 {
+    // 校园一卡通 —— VS Code 构建任务
+    // 推荐直接用 build.exe（纯 C 构建器，会生成图标并跑单元测试）
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "C: 构建 main.exe",
+            "label": "构建全部（build.exe）",
             "type": "shell",
-            "command": "gcc",
-            "args": [
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-O2",
-                "-fexec-charset=UTF-8",
-                "-Isrc",
-                "main.c",
-                "src/campus.c",
-                "-o",
-                "main.exe"
-            ],
+            "command": "${workspaceFolder}/build.exe",
             "options": { "cwd": "${workspaceFolder}" },
-            "problemMatcher": ["$gcc"],
             "group": { "kind": "build", "isDefault": true },
-            "detail": "源码为 UTF-8，必须带 -fexec-charset=UTF-8，否则中文乱码。"
+            "problemMatcher": [],
+            "detail": "生成图标 + 编译 server/main/桌面应用 + 跑单元测试"
         },
         {
-            "label": "C: 构建桌面应用 校园一卡通.exe",
+            "label": "运行: 桌面应用",
             "type": "shell",
-            "command": "gcc",
-            "args": [
-                "-std=c11", "-Wall", "-Wextra", "-O2",
-                "-mwindows",
-                "-fexec-charset=UTF-8",
-                "src/launcher.c",
-                "-o", "校园一卡通.exe",
-                "-lcomctl32", "-lgdi32", "-luser32", "-lws2_32", "-lshell32"
-            ],
+            "command": "${workspaceFolder}/校园一卡通.exe",
             "options": { "cwd": "${workspaceFolder}" },
-            "problemMatcher": ["$gcc"],
-            "detail": "-mwindows 表示 GUI 子系统：双击不弹控制台窗口。"
-        }/main.exe",
+            "problemMatcher": []
+        },
+        {
+            "label": "运行: 命令行版",
+            "type": "shell",
+            "command": "${workspaceFolder}/main.exe",
             "options": { "cwd": "${workspaceFolder}" },
-            "problemMatcher": [],
-            "group": { "kind": "test" },
-            "detail": "数据保存在 data/ 目录：cards.dat 卡片、<卡号>.txt 上机记录、income.dat 收入流水。"
+            "problemMatcher": []
+        },
+        {
+            "label": "自检: 桌面应用",
+            "type": "shell",
+            "command": "gcc -std=c11 -O2 -fexec-charset=UTF-8 launcher.c -o selftest.exe -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32 && ./selftest.exe --selftest",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
         }
     ]
 }

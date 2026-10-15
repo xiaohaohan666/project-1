@@ -2,9 +2,10 @@
 rem ============================================================
 rem  校园一卡通 —— 一键启动
 rem
-rem  本文件以 GBK 保存：cmd 按系统 ANSI 代码页读取批处理文件，
-rem  保存成 GBK 它才能正确识别其中的中文（含下面的中文文件名）。
-rem  程序自身的输出已由 SetConsoleOutputCP(65001) 设为 UTF-8。
+rem  本文件以 GBK 保存、行尾为 CRLF：
+rem    · cmd 按系统 ANSI 代码页读取批处理，存成 UTF-8 会解析失败
+rem    · 行尾必须是 CRLF；用 LF 时 rem 注释行会被截断，残句被当成命令
+rem  程序自身的输出由 SetConsoleOutputCP(65001) 设为 UTF-8。
 rem ============================================================
 setlocal
 cd /d "%~dp0"
@@ -14,45 +15,41 @@ echo   校园一卡通
 echo ============================================================
 echo.
 
-set "GCC="
-where gcc >nul 2>nul && set "GCC=gcc"
-if not defined GCC if exist "C:\Program Files\mingw64\bin\gcc.exe" set "GCC=C:\Program Files\mingw64\bin\gcc.exe"
-if not defined GCC if exist "C:\mingw64\bin\gcc.exe" set "GCC=C:\mingw64\bin\gcc.exe"
-
 set "APP=校园一卡通.exe"
 
-if exist "server.exe" if exist "%APP%" goto RUN
-if not defined GCC goto NOGCC
+rem ---------- 1. 缺什么编什么 ----------
+if not exist "server.exe" goto BUILD
+if not exist "%APP%"      goto BUILD
+goto RUN
 
-echo [1/2] 正在编译（源码是 UTF-8，必须带 -fexec-charset=UTF-8）...
-"%GCC%" -std=c11 -Wall -Wextra -O2 -fexec-charset=UTF-8 -Isrc src\server.c src\campus.c -o server.exe -lws2_32
+:BUILD
+if not exist "build.exe" goto NOBUILD
+echo [1/2] 正在构建（生成图标 + 编译程序 + 跑单元测试）...
+echo.
+build.exe
 if errorlevel 1 goto BUILDFAIL
-"%GCC%" -std=c11 -Wall -Wextra -O2 -fexec-charset=UTF-8 -Isrc main.c src\campus.c -o main.exe
-if errorlevel 1 goto BUILDFAIL
-if exist campus.ico where windres >nul 2>nul && windres --input src\launcher.rc --output launcher_res.o --output-format=coff
-"%GCC%" -std=c11 -Wall -Wextra -O2 -mwindows -fexec-charset=UTF-8 src\launcher.c launcher_res.o -o "%APP%" -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32
-if errorlevel 1 goto BUILDFAIL
-if exist launcher_res.o del launcher_res.o
-echo       编译完成。
 echo.
 goto RUN
 
-:NOGCC
-echo [错误] 没有找到 gcc，且程序尚未编译。
-echo        请安装 MinGW-w64 后重试，或把编译好的 exe 放到本目录。
+:NOBUILD
+echo [错误] 找不到 build.exe，且程序尚未编译。
+echo.
+echo  请先编译构建器（需要 MinGW-w64 的 gcc）：
+echo      gcc -std=c11 -O2 build.c -o build.exe -lz
+echo  然后再运行本脚本。
 goto END
 
 :BUILDFAIL
 echo.
-echo [错误] 编译失败，请查看上面的报错信息。
+echo [错误] 构建失败，请查看上面的报错信息。
 goto END
 
 :RUN
 echo [2/2] 正在启动桌面应用 ...
 echo.
-echo   如果没有出现窗口，可以单独启动后端：
-echo       server.exe 8090 web data 0.0.0.0
-echo   然后用浏览器打开   http://127.0.0.1:8090/
+echo   如果没有出现窗口，可单独启动后端：
+echo       server.exe 8090 . data 0.0.0.0
+echo   再用浏览器打开   http://127.0.0.1:8090/
 echo.
 echo   演示账号
 echo       学生     C001 / C002 / C003      登录密码 123456

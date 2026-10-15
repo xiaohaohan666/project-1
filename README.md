@@ -1,348 +1,156 @@
-# 校园一卡通 —— 消费 / 机房上机 / 门禁考勤综合系统
+# 校园一卡通
 
-原为《模拟校园卡》（出题人：俞琼，面向专业：物联网工程）的作业实现，
-现已扩展为**校园一卡通**：保留机房上机计费作为一个消费点，并加入
-食堂、超市、文印、热水洗衣、宿舍水电、图书馆罚款共 7 个消费点，
-以及交易密码、双重消费限额、门禁考勤、卡务中心与统计报表。
+一个用**纯 C 语言**实现的校园一卡通系统，含消费、机房上机计费、门禁考勤、
+卡务办理与统计报表。全部代码为 C（C11 + 少量 Win32 API），无第三方运行时依赖。
 
-提供**命令行版**与**可安装的多端应用（PWA）**两种界面，共用同一套业务规则与数据文件。
+## 三种使用方式
 
-```
-main.c              命令行版：登录/注册、学生端、管理员端（卡务/商户/报表）
-src/campus.h/.c     业务核心：卡片与交易总账、消费扣款、限额风控、上机计费、
-                    门禁考勤、卡务管理、统计报表
-src/server.c        HTTP/JSON 服务兼静态托管（纯 C，跨 Windows / Linux，无第三方依赖）
-web/                前端应用（原生 HTML/CSS/JS，零构建、零依赖）
-  index.html          页面结构：登录注册 + 学生四视图 + 管理三视图
-  css/app.css         样式（CSS 变量 + 响应式 + 独立窗口适配）
-  js/api.js           网络层：统一请求、身份与交易密码携带
-  js/ui.js            部件层：提示条 / 弹窗 / 输入弹窗 / 转义
-  js/app.js           业务层：视图切换、渲染、消费与卡务交互、上机计时
-  js/pwa.js           PWA 装配：Service Worker、安装引导、离线提示
-  sw.js               Service Worker：外壳缓存 + 接口不缓存
-  manifest.webmanifest 应用清单（可安装、独立窗口、桌面快捷方式）
-  icons/              应用图标（PNG，由 tools/make_icons.py 生成）
-tools/              图标生成、前端一致性检查、接口验收脚本
-deploy/             公网隧道脚本与验收脚本
-Dockerfile          容器镜像定义（适配 Render / Railway / Fly.io）
-render.yaml         Render 部署蓝图
-.github/workflows/  CI：Linux + Windows 双平台编译与接口冒烟测试；keepalive 探活
-data/               数据目录（卡片、交易总账、门禁记录、上机记录）
-```
-
-## 一、一卡通功能总览
-
-| 模块 | 功能 |
-|---|---|
-| **账户资金** | 充值、余额、消费扣款、退款、补助发放、交易流水（含交易后余额） |
-| **消费支付** | 食堂、超市、文印店、热水洗衣、宿舍水电、图书馆罚款、机房上机 |
-| **风控** | 交易密码（默认取学号后 6 位）、单笔限额、日累计限额（按自然日滚动清零） |
-| **卡务管理** | 注册发卡、挂失、解除挂失、冻结、解除冻结、补办（收工本费、保留余额）、重置登录密码、重置交易密码、卡片延期 |
-| **身份识别** | 门禁刷卡、考勤签到/签退，地点可选（宿舍楼、教学楼、图书馆、实验楼） |
-| **机房上机** | 上机登记、按时计费（2.00 元/小时）、下机结账；保留原作业要求 |
-| **查询报表** | 学生查流水与消费统计；管理员看当天全站汇总、各消费点消费额、全部流水、门禁记录、卡片一览 |
-
-## 二、数据文件（data/）
-
-| 文件 | 字段（以 `|` 分隔） | 写入方式 |
+| 方式 | 入口 | 说明 |
 |---|---|---|
-| `cards.dat` | 卡号 \| 姓名 \| 学号 \| 登录密码 \| 交易密码 \| 累计充值 \| 余额 \| 状态 \| 是否上机 \| 开始时间 \| 地点 \| 日限额 \| 今日已用 \| 今日日期 \| 单笔限额 \| 有效期 | 全量覆写 |
-| `ledger.dat` | 流水号 \| 时间 \| 卡号 \| 类型 \| 商户 \| 金额 \| 交易后余额 \| 终端 \| 备注 | **追加写** |
-| `access.dat` | 卡号 \| 时间 \| 方向 \| 地点 \| 用途 | **追加写** |
-| `<卡号>.txt` | 卡号 \| 上机日期 \| 开始时间 \| 用时(分) \| 费用 \| 状态 \| 地点 | **追加写** |
-| `income.dat` | 日期 \| 金额 | 追加写（兼容旧数据） |
+| **桌面应用** | 双击 `校园一卡通.exe` | 独立窗口、无地址栏、无标签页；含自定义图标 |
+| **网页** | 双击 `start.bat`，或运行 `server.exe 8090 . data 0.0.0.0` | 浏览器打开 `http://127.0.0.1:8090/` |
+| **命令行** | `main.exe` | 学生 / 管理员两套菜单，适合教学演示 |
 
-状态编号：`0` 正常、`1` 挂失、`2` 冻结、`3` 已过期。
-交易类型：`0` 充值、`1` 消费、`2` 退款、`3` 工本费、`4` 补助。
-旧版 10 字段的 `cards.dat` 仍可读取，缺失字段会自动补默认值。
+PWA：网页在 HTTPS 或 localhost 下，可用浏览器「添加到主屏幕」当 App 使用。
 
+## 目录与文件
 
-## 零、作为应用程序使用（PWA）
+```
+校园一卡通/
+├─ campus.h / campus.c     业务核心：数据模型、限额风控、上机计费、报表
+├─ server.c                网页服务：手写 HTTP/1.1 + JSON，静态托管
+├─ main.c                  命令行界面：学生菜单 + 管理员菜单
+├─ launcher.c              桌面应用：Win32 窗口，启动后端并打开界面
+├─ launcher.rc             桌面应用的图标资源
+├─ build.c                 构建器：生成图标 → 编译 → 跑单元测试
+├─ test_jstr.c             JSON 多字节处理单元测试
+├─ build.exe               已编译的构建器（可直接用，无需自行编译）
+├─ campus.ico              应用图标（7 种尺寸）
+├─ start.bat               一键启动（缺什么编什么，然后启动桌面应用）
+├─ index.html              前端页面
+├─ css/ js/ icons/         前端样式、脚本、PWA 图标
+├─ sw.js / manifest.webmanifest / 404.html    PWA 支持
+├─ Dockerfile              容器镜像（Linux 下编译命令行版）
+└─ 模拟校园卡-俞琼-物联网工程.pdf    需求文档
+```
 
-网页版同时也是**可安装的应用程序**：浏览器打开后即可"安装到本机"，
-安装后以独立窗口运行、有独立图标、断网也能打开界面。
-
-| 平台 | 安装方式 |
-|---|---|
-| Windows / macOS / Linux（Chrome、Edge） | 地址栏右侧的安装图标，或"安装应用"按钮 |
-| Android（Chrome） | 菜单 →「安装应用」/「添加到主屏幕」 |
-| iOS / iPadOS（Safari） | 分享 →「添加到主屏幕」（系统限制，无自动安装） |
-
-技术要点：
-
-- **Service Worker**（`sw.js`）两条策略——应用外壳 `stale-while-revalidate`
-  （命中缓存秒开，同时后台更新）；`/api/` 请求严格 `network-only`
-  （余额与计费必须实时，绝不缓存），离线时返回结构化错误
-- **应用清单**（`manifest.webmanifest`）声明 `standalone` 显示模式、
-  主题色、192/512 图标、`maskable` 自适应图标与两个桌面快捷方式
-- **多端适配**：响应式断点（900px 单栏、640px 统计块折半）、
-  刘海屏安全区 `env(safe-area-inset-*)`、动态视口高度 `100dvh`、
-  触屏目标尺寸与防 iOS 聚焦缩放、系统"减少动态效果"适配
-- **离线提示**：`offline-bar` 状态条 + 卡面降饱和，明确告知数据可能不是最新
-
-> Service Worker 需要**安全上下文**：`https://` 或 `localhost`。
-> 通过 `file://` 打开或用局域网 IP 的 `http://` 访问时不会注册 SW
-> （界面仍可用，只是没有离线能力与安装能力）。
-
-图标重新生成：
+## 构建
 
 ```bash
-python tools/make_icons.py     # 纯标准库手写 PNG 编码，无需 Pillow
+build.exe                # 生成图标 + 编译三个程序 + 跑单元测试
 ```
 
-## 一、题目要求与实现对应
-
-| 题目要求 | 实现 |
-|---|---|
-| 登录模块：同学根据自己设定的密码登录，**三次错误则冻结账户** | `student_login()` / `campus_check_pwd()` |
-| 管理员：**充值、挂失、重置学生密码** | 管理员菜单 1 / 2 / 3 |
-| 学生：查询**卡中余额、上机时间和地点** | 学生菜单 1，上机中还显示已用时长与预计费用 |
-| 学生：**统计自己上机时间、上机费用** | 学生菜单 4，可选今天 / 本周 / 本月 / 全部 |
-| 参考数据结构：卡号、姓名、学号、充值数额、余额、状态（正常、挂失、冻结） | `Card` 结构体 |
-| 每个学生对应一个文本文件存放上机记录：卡号、上机日期、开始时间、上机用时、状态、上机地点 | `Record` 结构体 + `<卡号>.txt` |
-| 上机记录表**永久保存**，用于事后查询和统计 | 记录**追加**写入，永不覆盖 |
-| 菜单选择项：角色选择、时间选择、功能选择 | 主菜单 / 统计时间菜单 / 各级功能菜单 |
-| 选做：对用户输入进行正确性检查 | 数字、金额、菜单编号、卡号、密码全部校验 |
-| 选做：**管理员统计全部当天收入情况** | 管理员菜单 4 |
-| 其他：注释详细、层次清晰、命名规范 | 源码逐项注释，分六层组织 |
-
-## 二、功能清单
-
-**主菜单（角色选择）**
-```
-1. 学生登录      2. 管理员登录      0. 返回（退出系统）
-```
-
-**学生菜单**
-```
-1. 查询卡中余额、上机时间和地点
-2. 上机登记
-3. 下机结账
-4. 统计上机时间与费用      （今天 / 本周 / 本月 / 全部）
-5. 修改登录密码            （题目要求"同学根据自己设定的密码登录"）
-```
-
-**管理员菜单**
-```
-1. 学生充值
-2. 卡片挂失                （正在上机则先自动结账）
-3. 重置学生密码（同时解除冻结）
-4. 统计当天收入情况
-```
-
-## 三、计费规则
-
-- 费率 **2.00 元 / 小时**（`RATE_PER_HOUR`），按实际分钟折算，保留两位小数；
-- 上机登记记录开始时间与地点；下机结账计算用时、扣余额、写记录；
-- 余额不足不能上机；结账时余额不够则清零并视为欠费；
-- **挂失时若正在上机，先自动按下机结账**，避免费用无上限累积。
-
-## 四、编译与运行
-
-### 命令行版
+`build.exe` 已随仓库提供。需要自己重新编译构建器时（要 MinGW-w64 的 gcc）：
 
 ```bash
-gcc -std=c11 -Wall -Wextra -O2 -fexec-charset=UTF-8 -Isrc main.c src/campus.c -o main
-./main
+gcc -std=c11 -O2 build.c -o build.exe -lz
 ```
 
-### 网页版（本地）
+手工编译各程序（注意 **必须带 `-fexec-charset=UTF-8`**，否则中文会乱码）：
 
 ```bash
-gcc -std=c11 -Wall -Wextra -O2 -fexec-charset=UTF-8 -Isrc src/server.c src/campus.c -o campus-server
-./campus-server 8090 web data
-```
+# 网页服务
+gcc -std=c11 -Wall -Wextra -O2 -s -fexec-charset=UTF-8 \
+    server.c campus.c -o server.exe -lws2_32
 
-浏览器打开 **http://127.0.0.1:8090/**；若要让同一局域网的同学访问，用本机内网 IP 替换
-`127.0.0.1`（服务默认监听 `0.0.0.0`）。
-Windows 下编译服务需额外链接 WinSock：加 `-lws2_32`。
+# 命令行版
+gcc -std=c11 -Wall -Wextra -O2 -s -fexec-charset=UTF-8 \
+    main.c campus.c -o main.exe
 
-演示卡号 `C001` / `C002` / `C003`，密码 `123456`；管理员密码 `admin123`。
-
-> 源码为 UTF-8。Windows 下编译命令行版必须带 `-fexec-charset=UTF-8`，否则中文乱码
-> （程序内已用 `SetConsoleOutputCP(65001)` 让控制台按 UTF-8 显示）。
-
-## 五、REST API
-
-身份通过请求头 `X-Token`（学生为卡号，管理员为 `ADMIN`）与 `X-Pwd`（对应密码）携带，
-服务端每次校验，因此无服务端会话、天然支持多副本部署。
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET  | `/api/health` | 服务与费率自检 |
-| POST | `/api/login` | `{id,pwd,admin?}` 登录校验 |
-| GET  | `/api/card` | 当前卡片：余额、累计充值、状态、上机信息 |
-| POST | `/api/machine` | `{action:"online"\|"offline", place?}` 上机 / 下机 |
-| GET  | `/api/records` | 当前卡的上机记录 |
-| GET  | `/api/stats?period=day\|week\|month\|all` | 上机次数 / 时长 / 费用 |
-| POST | `/api/lost` | 学生自助挂失 |
-| POST | `/api/pwd` | `{newPwd}` 学生修改密码 |
-| GET  | `/api/admin/cards` | 全部卡片与汇总 |
-| GET  | `/api/admin/income` | 当天收入统计 |
-| GET  | `/api/admin/records?id=C001` | 指定卡的上机记录 |
-| POST | `/api/admin/recharge` | `{id,amount}` 充值 |
-| POST | `/api/admin/lost` | `{id}` 挂失 |
-| POST | `/api/admin/reset` | `{id}` 重置学生密码 |
-
-```bash
-# 登录
-curl -s -X POST http://127.0.0.1:8090/api/login \
-     -H "Content-Type: application/json" -d '{"id":"C001","pwd":"123456"}'
-
-# 上机登记
-curl -s -X POST http://127.0.0.1:8090/api/machine \
-     -H "Content-Type: application/json" \
-     -H "X-Token: C001" -H "X-Pwd: 123456" \
-     -d '{"action":"online","place":"A101 机房"}'
-
-# 管理员当天收入
-curl -s http://127.0.0.1:8090/api/admin/income \
-     -H "X-Token: ADMIN" -H "X-Pwd: admin123"
-```
-
-## 六、容器部署
-
-```bash
-docker build -t campus-card .
-docker run -p 8090:8090 -v campus-data:/app/data campus-card
-```
-
-镜像内服务监听 `0.0.0.0`，端口可用环境变量 `PORT` 覆盖，数据卷挂在 `/app/data`。
-
-## 七、数据文件（data/）
-
-| 文件 | 字段（以 `|` 分隔） |
-|---|---|
-| `cards.dat` | 卡号 \| 姓名 \| 学号 \| 登录密码 \| 累计充值 \| 余额 \| 状态 \| 是否上机 \| 开始时间 \| 上机地点 |
-| `<卡号>.txt` | 卡号 \| 上机日期 \| 开始时间 \| 用时(分钟) \| 费用(元) \| 状态 \| 上机地点 |
-| `income.dat` | 日期 \| 金额(元)（充值与结账各记一条，用于统计当天收入） |
-
-状态编号：`0` 正常、`1` 挂失、`2` 冻结；是否上机：`0` 未上机、`1` 上机中。
-
-## 八、持续集成
-
-`.github/workflows/build.yml` 在每次推送时：
-
-1. **Linux**：编译命令行版与服务，跑一轮"学生上机 → 下机结账"和接口冒烟测试；
-2. **Windows**：用 MinGW 编译两个目标（验证 `-lws2_32` 链路）。
-
-## 九、跨平台说明
-
-- `main.c` 用 `#ifdef _WIN32` 区分密码输入与清屏实现（`_getch`/`cls` 与 `termios`/`clear`）；
-- `src/server.c` 用一层薄适配区分 WinSock 与 BSD socket（`sock_t` / `sock_init` / `sock_close`），
-  业务层与前端完全跨平台。
-
-## 附：自动化验收
-
-```bash
-python tools/acceptance.py http://127.0.0.1:8090    # 23 项接口验收
-python tools/check_frontend.py                      # 前端 DOM/class/CSS 一致性
-python tools/check_pwa.py                           # PWA 清单与图标校验
-```
-
-`tools/acceptance.py` 覆盖：健康检查、商户列表、注册发卡、充值、商户终端代扣、
-交易密码校验、单笔限额拦截、限额调整、流水查询、消费统计、门禁签到、
-当天全站报表、各消费点分列、挂失拦截、解除挂失、补办扣费、补助发放、
-卡片延期、重置交易密码、门禁记录查询、卡片列表。
-## 附二：容量与分页（压测结论）
-
-系统经过 200 张卡 / 9972 笔流水 与 300 张卡 / 30832 笔流水 两组大样本压测。
-
-**容量上限**（定义于 `src/campus.h`）：
-
-| 常量 | 默认 | 含义 | 超限行为 |
-|---|---|---|---|
-| `CARD_MAX` | 200 | 可载入的卡片数 | 超出部分不载入，**通过 `cardTruncated` 标记告警**（不再静默丢弃） |
-| `REC_MAX` | 5000 | 单卡上机记录读取上限 | 只取最近 5000 条 |
-| `LEDGER_MAX` | 20000 | 流水覆盖读取上限 | 只保留最近 20000 条（仅 CLI 展示用） |
-| `INCOME_MAX` | 5000 | 旧版收入流水内存上限 | 只保留最近 5000 条 |
-
-**接口分页**：`/api/ledger`、`/api/admin/ledger`、`/api/access`、
-`/api/admin/access` 均返回 `total` / `count` / `hasMore`（或 `truncated`），
-单页最多 300 条。可通过 `?offset=N` 翻页。
-这样即使流水有数万条，响应体积也稳定在几十 KB，不会超出服务端缓冲。
-
-**栈占用**：报表与统计类函数不再把上万条流水读入数组，
-改为顺序扫描边读边累加，单次请求的栈占用从 1MB 级降到 KB 级。
-
-**压力测试工具**：
-
-```bash
-python tools/gen_data.py big/data 200 60    # 生成 200 卡 / 约 1 万笔流水
-python tools/stress.py http://127.0.0.1:8091 # 容量、性能、边界条件
-python tools/capacity.py http://127.0.0.1:8092 300 30832   # 超上限行为
-python tools/verify_parse.py http://127.0.0.1:8091 big/data  # 字段解析对照原始文件
-```
-## 附三：桌面应用（纯 C + Win32）
-
-`src/launcher.c` 编译出一个**真正的 Windows 桌面程序**，双击即用：
-
-```bash
-gcc -std=c11 -Wall -Wextra -O2 -mwindows -fexec-charset=UTF-8 src/launcher.c \
-    -o 校园一卡通.exe -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32
-```
-
-`-mwindows` 让 PE 子系统为 GUI：双击不弹黑色控制台窗口。
-
-双击 `校园一卡通.exe` 后：
-
-1. 静默启动同目录的 `server.exe`（`CREATE_NO_WINDOW`，无控制台）
-2. 自动用 Edge/Chrome 的「应用模式」打开界面
-   （独立窗口、无地址栏、无标签页；找不到浏览器则退化为默认浏览器）
-3. 窗口显示服务状态、卡片数、费率，以及本机/局域网地址
-4. 通过前端心跳判断界面是否关闭
-5. 关闭窗口即停止后端，不残留进程
-
-窗口按钮：**打开界面**（应用模式）、**浏览器标签页**、**复制手机地址**、**退出**。
-
-自检（不需要窗口，用控制台版编译后运行）：
-
-```bash
-gcc -std=c11 -O2 -fexec-charset=UTF-8 src/launcher.c -o launcher_test.exe \
+# 桌面应用（先编译图标资源）
+windres launcher.rc -o launcher_res.o --output-format=coff
+gcc -std=c11 -Wall -Wextra -O2 -s -mwindows -fexec-charset=UTF-8 \
+    launcher.c launcher_res.o -o 校园一卡通.exe \
     -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32
-./launcher_test.exe --selftest
 ```
 
-自检会依次验证：取局域网 IP、探测浏览器、启动后端、等待就绪、
-读取健康信息、心跳收发、停止并确认无残留进程。
+`-mwindows` 让 PE 子系统为 GUI，双击不会弹出黑色控制台窗口。
 
-> 除桌面应用外还保留两个不依赖编译的启动方式：
-> `start.bat`（纯 ASCII，双击启动并用默认浏览器打开）与
-> `校园一卡通.pyw`（Python 版，界面更完整，含运行日志）。
-## 附四：一键构建与自检
+## 自检
+
+桌面应用内置两个自检模式，不需要图形界面即可运行：
 
 ```bash
-python tools/build.py            # 编译全部产物 + 跑单元测试
-python tools/build.py --release  # 同上，且 -Werror 严格模式
+windres launcher.rc -o launcher_res.o --output-format=coff
+gcc -std=c11 -O2 -fexec-charset=UTF-8 launcher.c launcher_res.o \
+    -o selftest.exe -lcomctl32 -lgdi32 -luser32 -lws2_32 -lshell32
+
+selftest.exe --layoutcheck   # 窗口适配：6 档尺寸下控件是否越界/重叠
+selftest.exe --selftest      # 端到端：取 IP、探浏览器、启后端、心跳、停止
 ```
 
-产物：`server.exe`（网页服务）、`main.exe`（命令行版）、
-`校园一卡通.exe`（桌面应用，含图标）。
+`--layoutcheck` 会把不同窗口尺寸下每个控件的几何位置算出来并检查，
+是「窗口适配」这一项的回归测试。
 
-自己跑界面相关审计：
+## 账号
 
-```bash
-python tools/audit_frontend.py   # JS 引用的选择器是否都存在于 HTML/CSS
-python tools/audit_deadcode.py   # 定义但从未被调用的函数、未接线的接口
-python tools/check_frontend.py   # DOM id / class / CSS 变量一致性
-python tools/test_ui.py          # 真实浏览器内核点击测试（需可启动浏览器）
-python tools/acceptance.py       # 后端 23 项端到端验收（自建独立实例）
-```
+| 角色 | 账号 | 登录密码 | 交易密码 |
+|---|---|---|---|
+| 学生 | `C001` / `C002` / `C003` | `123456` | `010101` / `010102` / `010103` |
+| 管理员 | 登录页切「管理员」 | `admin123` | — |
 
-### 一个必须记住的坑：UTF-8 按字节截断
+新注册的卡，交易密码默认取**学号末 6 位**。
+默认限额：单笔 20 元、日累计 50 元（管理员可调整）。
 
-固定长度的 `char` 缓冲区在存中文时**不能按字节数硬截断**。
-一个汉字占 3 字节，砍在中间会产生非法字节序列，
-导致**整条 JSON 响应无法解析**，前端所有数据都拿不到。
-本项目因此踩过两次：
+## 功能
 
-- `h_register` 的 `char name[12]`（只够 4 个汉字）→ 姓名稍长即截断
-- `j_get_str` 的边界回退写成了无条件执行 → 又白丢一个完整汉字
+**学生端**：消费（6 个消费点）、机房上机与计时、门禁考勤刷卡、
+交易流水、消费统计、上机记录、修改登录密码、修改交易密码、自助挂失/解挂。
 
-现在统一为：先按容量截断，**仅当确实截断时**才回退到字符边界
-（`campus_utf8_trim` 与 `j_get_str` 内的回退逻辑），
-并由 `tests/test_jstr.c` 单元测试守着：
+**管理端**：商户终端模拟 POS 扣款、卡务中心（充值 / 挂失 / 解挂 / 冻结 /
+重置密码 / 重置交易密码 / 补办 / 调整限额 / 延期 / 发放补助）、
+当天全站汇总报表、各消费点消费额、交易流水、门禁记录、全部卡片一览。
 
-```bash
-gcc -std=c11 -O2 -fexec-charset=UTF-8 tests/test_jstr.c -o t.exe && ./t.exe
-```
+消费点：`食堂`、`超市`、`文印店`、`热水洗衣`、`宿舍水电`、`图书馆罚款`、`机房`。
+
+## 数据与接口
+
+数据以 `|` 分隔的文本保存在 `data/`：
+
+| 文件 | 内容 | 写入方式 |
+|---|---|---|
+| `cards.dat` | 全部卡片 | 全量覆写 |
+| `ledger.dat` | 交易流水 | 追加 |
+| `access.dat` | 门禁记录 | 追加 |
+| `<卡号>.txt` | 该卡上机记录 | 追加 |
+| `income.dat` | 旧版收入流水（兼容） | 追加 |
+
+无服务端会话：每个请求带 `X-Token`（卡号或 `ADMIN`）与 `X-Pwd`；
+消费类请求另带 `X-PayPwd`。接口列表见 `server.c` 的路由分派。
+
+列表类接口支持分页（`?offset=N`），并回传 `total` / `count` / `hasMore`，
+避免流水过多时响应超出缓冲区。
+
+## 三个必须记住的坑
+
+### 1. 固定长度缓冲区存中文**不能按字节截断**
+
+一个汉字占 3 字节。若按字节数硬砍，末尾会留下不完整的字节序列，
+**整条 JSON 响应都会无法解析**（`invalid continuation byte`），
+现象是「界面能打开，但所有数据都拿不到、功能全不正常」。
+本项目因此踩过两次（`char name[12]` 只够 4 个汉字；边界回退写成了
+无条件执行，又白丢一个完整汉字）。现在统一为：**仅当确实被截断时**
+才回退到字符边界，并由 `test_jstr.c` 守着。
+
+### 2. 批处理文件必须 GBK + CRLF
+
+`cmd` 按系统 ANSI 代码页读取批处理文件：
+
+- 存成 UTF-8 → 中文注释解析失败
+- 行尾为 LF → `rem` 注释行被截断，残句被当成命令执行
+
+所以 `start.bat` 以 **GBK 保存、CRLF 换行**，并在 `.gitattributes`
+里为 `*.bat` 指定 `eol=crlf`，防止换行被转换。
+
+### 3. 窗口布局必须响应式
+
+桌面应用的控件位置全部由 `compute_layout(W, H)` 按窗口宽度等比算出，
+不能写死像素坐标。早期版本硬编码坐标，窗口一缩放就出现标题叠字、
+控件跑到窗口外，看起来像「界面没做适配」。缩放系数只按**宽度**算：
+内容高度随宽度等比增长，纵向多余留白由吸底的按钮行吸收。
+
+## 已知限制
+
+- 卡片上限 `CARD_MAX` 是编译期常量（默认 200）。超出部分不载入，
+  但会通过 `cardTruncated` 标记显式告警，不再静默丢弃。
+- 服务端单线程、无 TLS。真实部署应在前面加反向代理。

@@ -1,9 +1,20 @@
-# 统一换行符：仓库内一律使用 LF，避免 Windows/Linux 协作时整文件变更
+# 换行符策略
+#
+# 默认统一为 LF，避免 Windows/Linux 协作时整文件变更。
 * text=auto eol=lf
 
-# 明确二进制类型
+# 例外：批处理文件必须是 CRLF，且以 GBK 保存。
+#   · cmd 按系统 ANSI 代码页读取批处理，存成 UTF-8 会解析失败
+#   · 行尾若为 LF，rem 注释行会被截断，残句被当成命令执行
+# 因此这两个文件既不能转换换行，也不能做编码转换，必须按原样保存。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 明确二进制类型，禁止任何转换
 *.png binary
 *.jpg binary
+*.jpeg binary
 *.ico binary
 *.pdf binary
 *.exe binary
+*.o binary
