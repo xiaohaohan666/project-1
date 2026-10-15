@@ -24,6 +24,7 @@
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <windows.h>       /* SetConsoleOutputCP：控制台按 UTF-8 显示中文 */
 typedef SOCKET sock_t;
 #  define sock_close closesocket
 static int sock_init(void) {
@@ -905,6 +906,9 @@ static void handle_conn(sock_t fd) {
 
 int main(int argc, char **argv) {
     int port = 8090;
+#ifdef _WIN32
+    SetConsoleOutputCP(65001);      /* 保证启动信息里的中文不乱码 */
+#endif
     const char *env_port = getenv("PORT");
     const char *host = "0.0.0.0";
     const char *data_dir = "data";
