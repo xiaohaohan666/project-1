@@ -51,8 +51,6 @@ jobs:
           echo "路径检查通过"
 
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true          # 首次运行时自动启用 Pages
 
       - uses: actions/upload-pages-artifact@v3
         with:
