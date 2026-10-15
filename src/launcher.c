@@ -618,7 +618,11 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show) {
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = g_brush_bg;
     wc.lpszClassName = L"CampusCardLauncher";
-    wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+    /* 优先用编译进 exe 的自定义图标（资源 id 1）；
+     * 没有资源时退化为系统默认图标 */
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+    if (!wc.hIcon) wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIconSm = wc.hIcon;
     if (!RegisterClassExW(&wc)) {
         MessageBoxW(NULL, L"窗口类注册失败", L"错误", MB_ICONERROR);
         return 1;

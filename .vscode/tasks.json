@@ -37,11 +37,7 @@
             "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": ["$gcc"],
             "detail": "-mwindows 表示 GUI 子系统：双击不弹控制台窗口。"
-        },
-        {
-            "label": "运行: 启动模拟校园卡系统",
-            "type": "shell",
-            "command": "${workspaceFolder}/main.exe",
+        }/main.exe",
             "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": [],
             "group": { "kind": "test" },

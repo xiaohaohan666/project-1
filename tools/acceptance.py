@@ -12,6 +12,7 @@ import io
 import os
 import sys
 import json
+import random
 import time
 import socket
 import shutil
@@ -33,6 +34,22 @@ def free_port():
     return p
 
 
+def _workdir(prefix):
+    """在工作区内建临时目录。
+
+    不用 tempfile.mkdtemp：它创建的目录在本机安全策略下会继承受限 ACL，
+    之后在其中建子目录会被拒绝（PermissionError）。手工拼路径则正常。
+    """
+    base = os.path.join(ROOT, '.accept')
+    os.makedirs(base, exist_ok=True)
+    for i in range(1000):
+        p = os.path.join(base, '%s%d' % (prefix, i))
+        if not os.path.exists(p):
+            os.makedirs(p)
+            return p
+    raise RuntimeError('无法创建临时目录')
+
+
 def start_server():
     """在临时目录启动一个全新实例，返回 (进程, 基地址, 临时目录)"""
     if not os.path.exists(EXE):
@@ -40,7 +57,7 @@ def start_server():
         print('  gcc -std=c11 -Wall -Wextra -O2 -fexec-charset=UTF-8 '
               '-Isrc src/server.c src/campus.c -o server.exe -lws2_32')
         sys.exit(2)
-    tmp = tempfile.mkdtemp(prefix='campus-accept-')
+    tmp = _workdir('run-')
     data = os.path.join(tmp, 'data')
     os.makedirs(data, exist_ok=True)          # 空目录 -> 服务会自动播种 3 张演示卡
     port = free_port()
@@ -81,6 +98,8 @@ def run(base):
         print('  [%s] %-26s %s' % ('OK ' if cond else 'FAIL', label, extra))
         if not cond:
             fails.append(label)
+            # 失败时把服务端原始返回打出来，便于定位是逻辑错还是断言错
+            print('       ^ 判定为假，最后响应: %s' % str(d)[:200])
         return cond
 
     st, d = call(base, '/api/health')
@@ -90,8 +109,9 @@ def run(base):
     check('商户列表（7 个消费点）', st == 200 and len(d.get('merchants', [])) == 7,
           str(d.get('merchants')))
 
-    # 每次用不同卡号，避免与历史数据冲突
-    cid = 'C9%03d' % (int(time.time()) % 1000)
+    # 每次用不同卡号，避免与历史数据冲突。
+    # 用时间戳低位会在一秒内重复运行验收时撞号，故用随机数。
+    cid = 'C9%03d' % random.randint(0, 999)
     st, d = call(base, '/api/register', 'POST',
                  {'id': cid, 'name': '验收同学', 'number': 'B9900100', 'pwd': 'abcd12'})
     check('新卡注册', st == 200 and d.get('ok'), cid)

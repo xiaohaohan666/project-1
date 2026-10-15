@@ -309,3 +309,40 @@ gcc -std=c11 -O2 -fexec-charset=UTF-8 src/launcher.c -o launcher_test.exe \
 > 除桌面应用外还保留两个不依赖编译的启动方式：
 > `start.bat`（纯 ASCII，双击启动并用默认浏览器打开）与
 > `校园一卡通.pyw`（Python 版，界面更完整，含运行日志）。
+## 附四：一键构建与自检
+
+```bash
+python tools/build.py            # 编译全部产物 + 跑单元测试
+python tools/build.py --release  # 同上，且 -Werror 严格模式
+```
+
+产物：`server.exe`（网页服务）、`main.exe`（命令行版）、
+`校园一卡通.exe`（桌面应用，含图标）。
+
+自己跑界面相关审计：
+
+```bash
+python tools/audit_frontend.py   # JS 引用的选择器是否都存在于 HTML/CSS
+python tools/audit_deadcode.py   # 定义但从未被调用的函数、未接线的接口
+python tools/check_frontend.py   # DOM id / class / CSS 变量一致性
+python tools/test_ui.py          # 真实浏览器内核点击测试（需可启动浏览器）
+python tools/acceptance.py       # 后端 23 项端到端验收（自建独立实例）
+```
+
+### 一个必须记住的坑：UTF-8 按字节截断
+
+固定长度的 `char` 缓冲区在存中文时**不能按字节数硬截断**。
+一个汉字占 3 字节，砍在中间会产生非法字节序列，
+导致**整条 JSON 响应无法解析**，前端所有数据都拿不到。
+本项目因此踩过两次：
+
+- `h_register` 的 `char name[12]`（只够 4 个汉字）→ 姓名稍长即截断
+- `j_get_str` 的边界回退写成了无条件执行 → 又白丢一个完整汉字
+
+现在统一为：先按容量截断，**仅当确实截断时**才回退到字符边界
+（`campus_utf8_trim` 与 `j_get_str` 内的回退逻辑），
+并由 `tests/test_jstr.c` 单元测试守着：
+
+```bash
+gcc -std=c11 -O2 -fexec-charset=UTF-8 tests/test_jstr.c -o t.exe && ./t.exe
+```

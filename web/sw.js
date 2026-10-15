@@ -11,7 +11,7 @@
  *  也可能被部署在子路径（如 GitHub Pages 的 /project-1/）。
  *  因此所有资源路径都基于自身作用域动态推导，不写死开头的 /。
  * ============================================================ */
-const VERSION = 'v2';
+const VERSION = 'v3';
 
 /* 作用域基路径：sw.js 位于 <base>/sw.js，去掉文件名即得基路径 */
 const BASE = self.location.pathname.replace(/\/sw\.js$/, '') || '';
@@ -96,29 +96,35 @@ self.addEventListener('fetch', (event) => {
   /* 只缓存同源的应用外壳 */
   if (url.origin !== self.location.origin) return;
 
+  /* 网络优先策略。
+   *
+   * 为什么不用 stale-while-revalidate：那样会「先返回旧缓存」，
+   * 于是改了代码后用户仍在使用上一版 JS —— 界面看起来正常，
+   * 但操作行为是旧的，极难排查。改成网络优先后：
+   *   在线 -> 永远拿到最新代码（并把新版本写入缓存）
+   *   离线 -> 回退到缓存，仍然可用
+   * 对本应用来说，联不上服务器时几乎什么都做不了，
+   * 所以「联网时必须最新」比「离线也要秒开」重要得多。 */
   event.respondWith((async () => {
     const cache = await caches.open(SHELL_CACHE);
-    /* 导航请求统一按 index.html 命中缓存 */
-    const key = (req.mode === 'navigate') ? full('index.html') : req;
-    const cached = await cache.match(key, { ignoreSearch: true });
-
-    const network = fetch(req).then((res) => {
+    try {
+      const res = await fetch(req);
       if (res && res.ok && res.type === 'basic') {
         cache.put(req, res.clone()).catch(() => {});
       }
       return res;
-    }).catch(() => null);
-
-    if (cached) return cached;
-    const res = await network;
-    if (res) return res;
-
-    if (req.mode === 'navigate') {
-      const fallback = await cache.match(full('index.html'));
-      if (fallback) return fallback;
+    } catch (e) {
+      /* 离线：回退缓存。导航请求统一回退到 index.html */
+      const key = (req.mode === 'navigate') ? full('index.html') : req;
+      const cached = await cache.match(key, { ignoreSearch: true });
+      if (cached) return cached;
+      if (req.mode === 'navigate') {
+        const fallback = await cache.match(full('index.html'));
+        if (fallback) return fallback;
+      }
+      return new Response('离线且无缓存', {
+        status: 504, headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+      });
     }
-    return new Response('离线且无缓存', {
-      status: 504, headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-    });
   })());
 });

@@ -163,6 +163,10 @@
     $('#btnOnline').disabled = blocked;
     $('#btnOnline').textContent = blocked ? `当前状态：${k.stateText}` : '上机登记';
     $('#btnPay').disabled = blocked;
+    /* 挂失按钮随卡片状态切换文案：正常时是「挂失」，挂失后是「解除挂失」 */
+    const lost = k.state === 1;
+    $('#tileLostText').textContent = lost ? '解除挂失' : '挂失';
+    $('#tileLostTip').textContent = lost ? '恢复卡片正常使用' : '上机中会先结账';
     $('#payTip').textContent = `单笔限额 ${k.limitOnce > 0 ? money(k.limitOnce) + ' 元' : '不限'}` +
       ` · 日累计 ${k.limitDay > 0 ? money(k.limitDay) + ' 元' : '不限'}` +
       ` · 今日已消费 ${money(k.usedDay)} 元`;
@@ -302,6 +306,76 @@
   bindSeg('#segPeriod', 'stats');
   bindSeg('#segLedger', 'ledger');
   bindSeg('#segConsume', 'consume');
+
+  /* 卡务：修改登录密码。
+   * 后端 /api/pwd 需要新密码至少 6 位，这里先用弹窗收两遍确认 */
+  $('#tilePwd').onclick = async () => {
+    const v = await prompt({
+      title: '修改登录密码',
+      fields: [
+        { name: 'p1', label: '新登录密码（至少 6 位）', type: 'password' },
+        { name: 'p2', label: '再输入一次', type: 'password' }
+      ],
+      confirmLabel: '保存'
+    });
+    if (!v) return;
+    if (v.p1.length < 6) return err('密码不得少于 6 位');
+    if (v.p1 !== v.p2) return err('两次输入不一致');
+    try {
+      await API.changePwd(v.p1);
+      API.setAuth(API.token, v.p1);            /* 同步本地凭据，避免下次登录失败 */
+      ok('登录密码已修改，请牢记新密码');
+    } catch (ex) { err(ex.message); }
+  };
+
+  /* 卡务：修改交易密码（消费时用） */
+  $('#tilePayPwd').onclick = async () => {
+    const v = await prompt({
+      title: '修改交易密码',
+      fields: [
+        { name: 'p1', label: '新交易密码（6 位数字）', type: 'password' },
+        { name: 'p2', label: '再输入一次', type: 'password' }
+      ],
+      confirmLabel: '保存'
+    });
+    if (!v) return;
+    if (!/^\d{6}$/.test(v.p1)) return err('交易密码必须是 6 位数字');
+    if (v.p1 !== v.p2) return err('两次输入不一致');
+    try {
+      await API.changePayPwd(v.p1);
+      API.setPayPwd(v.p1);                     /* 同步本地，消费时直接可用 */
+      ok('交易密码已修改');
+    } catch (ex) { err(ex.message); }
+  };
+
+  /* 卡务：自助挂失 / 解挂。
+   * 挂失后卡会被冻结不能消费；若正在上机，服务端会先结账 */
+  $('#tileLost').onclick = async () => {
+    if (state.card && state.card.state === 1) {
+      try {
+        const r = await API.selfUnlost();
+        ok('已解除挂失');
+        paintCard(r.card);
+        refreshStudent();
+      } catch (ex) { err(ex.message); }
+      return;
+    }
+    const v = await prompt({
+      title: '挂失校园卡',
+      fields: [{ name: 'payPwd', label: '交易密码（确认身份）', type: 'password' }],
+      confirmLabel: '确认挂失'
+    });
+    if (!v) return;
+    try {
+      /* 先用交易密码通过一次消费接口无法校验，这里直接调用挂失接口；
+       * 服务端会核对当前登录身份 */
+      API.setPayPwd(v.payPwd);
+      const r = await API.selfLoss();
+      ok('已挂失，如需恢复请再点一次「挂失」按钮解挂');
+      paintCard(r.card);
+      refreshStudent();
+    } catch (ex) { err(ex.message); }
+  };
 
   /* ---------------- 学生操作 ---------------- */
   $('#btnPay').onclick = async () => {

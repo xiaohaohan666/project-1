@@ -42,3 +42,10 @@ id_rsa*
 # ---- Python 缓存 ----
 __pycache__/
 *.pyc
+
+# ---- 测试与构建临时目录 ----
+.uitest/
+.vendor/
+.accept/
+.tmp/
+*.o

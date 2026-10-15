@@ -206,6 +206,33 @@ int campus_save(void) {
     return 1;
 }
 
+/* 前置声明：下面两个辅助函数互相依赖 */
+static size_t campus_utf8_trim(const char *s, size_t n);
+
+/* 按 UTF-8 字符边界把 src 复制进 dst（容量 cap），保证不产生半个汉字。 */
+static void copy_trim(char *dst, size_t cap, const char *src) {
+    size_t n = strlen(src);
+    if (n >= cap) n = campus_utf8_trim(src, cap - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* 把长度 n 收窄到 UTF-8 字符边界，避免把一个汉字切成两半。
+ *
+ * 为什么必须做：字段缓冲区是固定大小的字节数组，而一个汉字占 3 字节。
+ * 若按字节数硬截断，末尾会留下不完整的字节序列，整条 JSON 响应都会
+ * 无法解析（invalid continuation byte），前端所有数据都拿不到。
+ * 曾因「姓名超过 4 个汉字」导致界面功能整体不可用。 */
+static size_t campus_utf8_trim(const char *s, size_t n) {
+    while (n > 0) {
+        unsigned char c = (unsigned char)s[n - 1];
+        if (c < 0x80) break;                    /* ASCII，边界安全 */
+        if (c >= 0xC0) { n--; break; }          /* 落在字符首字节，回退 1 次 */
+        n--;                                    /* 续字节，继续前移 */
+    }
+    return n;
+}
+
 /* 按 | 切分一行，取第 idx 个字段（从 0 开始）写入 out。
  * 空字段会得到空串。
  * 注意：不能直接用 sscanf 的 %[^|]——它遇到空字段（两个连续 |）会失败并
@@ -220,7 +247,7 @@ static void field_at(const char *line, int idx, char *out, int osz) {
         if (i == idx) {
             /* 末字段去掉行尾换行 */
             while (len > 0 && (p[len - 1] == '\n' || p[len - 1] == '\r')) len--;
-            if (len >= (size_t)osz) len = (size_t)osz - 1;
+            if (len >= (size_t)osz) len = campus_utf8_trim(p, (size_t)osz - 1);
             memcpy(out, p, len);
             out[len] = '\0';
             return;
@@ -651,8 +678,10 @@ int campus_register(const char *id, const char *name, const char *number,
     k = &g_cards[g_n_card++];
     memset(k, 0, sizeof(*k));
     snprintf(k->id, sizeof(k->id), "%s", id);
-    snprintf(k->name, sizeof(k->name), "%s", name);
-    snprintf(k->number, sizeof(k->number), "%s", number);
+    /* 姓名与学号按字符边界截断：卡面/表格里姓名可能较长，
+     * 直接 snprintf 会砍断多字节汉字，使整个 JSON 响应失效 */
+    copy_trim(k->name, sizeof(k->name), name);
+    copy_trim(k->number, sizeof(k->number), number);
     snprintf(k->pwd, sizeof(k->pwd), "%s", pwd);
     /* 交易密码默认取学号后 6 位 */
     {

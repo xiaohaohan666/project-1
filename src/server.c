@@ -63,13 +63,36 @@ static char  *g_buf;
 static size_t g_len, g_cap;
 
 static void j_init(char *buf, size_t cap) { g_buf = buf; g_len = 0; g_cap = cap; g_buf[0] = '\0'; }
+
+/* 安全截断长度：保证不把一个多字节 UTF-8 字符切成两半。
+ * 中文占 3 字节，若按字节数硬砍，会在响应末尾留下无效的续字节，
+ * 客户端 JSON 解析会直接失败（invalid continuation byte）——
+ * 表现为「界面拿不到数据」。这里向前回退到字符边界。 */
+static size_t utf8_safe_len(const char *s, size_t n) {
+    while (n > 0) {
+        unsigned char c = (unsigned char)s[n - 1];
+        if (c < 0x80) break;                    /* ASCII，边界安全 */
+        if (c >= 0xC0) { n--; break; }          /* 落在字符首字节，最多回退 1 次 */
+        n--;                                    /* 续字节，继续前移 */
+    }
+    return n;
+}
+
 static void j_put(const char *s) {
     size_t n = strlen(s);
-    if (g_len + n + 1 > g_cap) n = g_cap - g_len - 1;
+    if (g_len + n + 1 > g_cap) {
+        if (g_cap <= g_len + 1) return;         /* 已无空间 */
+        n = g_cap - g_len - 1;
+        n = utf8_safe_len(s, n);                /* 不在字符中间截断 */
+    }
     memcpy(g_buf + g_len, s, n);
     g_len += n;
     g_buf[g_len] = '\0';
 }
+
+/* 缓冲区是否已接近写满。列表类接口在拼接每条记录前先问一句，
+ * 满了就停止追加并正常收尾，保证输出的 JSON 始终是完整的。 */
+static int j_full(void) { return g_len + 256 >= g_cap; }
 static void j_fmt(const char *fmt, ...) {
     char tmp[512];
     va_list ap;
@@ -133,7 +156,10 @@ static int j_get_str(const char *body, const char *key, char *out, int osz) {
     while (*p == ' ' || *p == ':' || *p == '\t') p++;
     if (*p != '"') { out[0] = '\0'; return 0; }
     p++;
-    while (*p && *p != '"' && i < osz - 1) {
+    /* 循环条件用 i + 1 < osz 而不是 i < osz - 1：后者少留了一个字节，
+     * 使得 4 字节缓冲连一个 3 字节汉字都放不下（只能得到空串）。
+     * 用 i + 1 < osz 时 i 最多到 osz-2，仍能安全写入 out[i] 与终止符。 */
+    while (*p && *p != '"' && i + 1 < osz) {
         if (p[0] == '\\' && p[1] == 'u' && isxdigit((unsigned char)p[2])) {
             /* 兼容 \uXXXX 转义：转成 UTF-8 写入 */
             unsigned int cp = 0;
@@ -159,6 +185,19 @@ static int j_get_str(const char *body, const char *key, char *out, int osz) {
         }
         if (p[0] == '\\' && p[1]) p++;
         out[i++] = *p++;
+    }
+    /* 仅当确实是被缓冲区上限截断时，才回退到 UTF-8 字符边界。
+     *
+     * 这里必须判断"是否截断"：若字符串本来就完整（正常遇到结尾引号），
+     * 无条件回退会把最后一个完整汉字也删掉——曾因此让「验收同学」
+     * 变成「验收同」，白丢一个字。 */
+    if (*p && *p != '"') {
+        while (i > 0) {
+            unsigned char c = (unsigned char)out[i - 1];
+            if (c < 0x80) break;              /* ASCII，边界安全 */
+            if (c >= 0xC0) { i--; break; }    /* 字符首字节，回退 1 次 */
+            i--;                              /* 续字节，继续前移 */
+        }
     }
     out[i] = '\0';
     return 1;
@@ -307,8 +346,13 @@ static void h_records(const char *token, const char *pwd) {
     n = campus_load_records(token, rec, REC_MAX);
     j_init(g_buf, g_cap);
     j_put("{\"ok\":true,\"records\":[");
-    for (int i = 0; i < n; i++) { if (i) j_put(","); put_record(&rec[i]); }
-    j_fmt("],\"total\":%d}", n);
+    int shown = 0;
+    for (int i = 0; i < n; i++) {
+        if (j_full()) break;
+        if (shown++) j_put(",");
+        put_record(&rec[i]);
+    }
+    j_fmt("],\"total\":%d,\"shown\":%d}", n, shown);
 }
 /* 机房上机统计 */
 static void h_stats(const char *token, const char *pwd, const char *period) {
@@ -354,8 +398,13 @@ static void h_ledger(const char *token, const char *pwd, const char *period,
     /* 是否还有下一页，便于前端做「加载更多」 */
     j_put("\"hasMore\":"); j_put((skip + n < total) ? "true" : "false");
     j_put(",\"records\":[");
-    for (int i = 0; i < n; i++) { if (i) j_put(","); put_tx(&tx[i]); }
-    j_put("]}");
+    int shown = 0, cut = 0;
+    for (int i = 0; i < n; i++) {
+        if (j_full()) { cut = 1; break; }
+        if (shown++) j_put(",");
+        put_tx(&tx[i]);
+    }
+    j_fmt("],\"shown\":%d,\"listTruncated\":%s}", shown, cut ? "true" : "false");
 }
 /* 消费统计 */
 static void h_consume(const char *token, const char *pwd, const char *period) {
@@ -502,8 +551,13 @@ static void h_access_log(const char *token, const char *pwd, const char *id,
     kv_i("count", n);         j_put(",");
     j_put("\"truncated\":"); j_put(truncated ? "true" : "false");
     j_put(",\"records\":[");
-    for (int i = 0; i < n; i++) { if (i) j_put(","); put_access(&logs[i]); }
-    j_put("]}");
+    int shown = 0, cut = 0;
+    for (int i = 0; i < n; i++) {
+        if (j_full()) { cut = 1; break; }
+        if (shown++) j_put(",");
+        put_access(&logs[i]);
+    }
+    j_fmt("],\"shown\":%d,\"listTruncated\":%s}", shown, cut ? "true" : "false");
 }
 
 /* ============================================================
@@ -511,20 +565,31 @@ static void h_access_log(const char *token, const char *pwd, const char *id,
  * ============================================================ */
 static void h_admin_cards(const char *token, const char *pwd) {
     double remain = 0.0, recharge = 0.0;
-    int online = 0;
+    int online = 0, shown = 0, truncated = 0;
     if (!auth(token, pwd, 1)) return;
     j_init(g_buf, g_cap);
     j_put("{\"ok\":true,\"cards\":[");
     for (int i = 0; i < campus_count(); i++) {
         Card *k = campus_at(i);
-        if (i) j_put(",");
+        /* 缓冲区将满则停止追加，保证 JSON 完整（总量在 total 里如实上报） */
+        if (j_full()) { truncated = 1; break; }
+        if (shown++) j_put(",");
         put_card(k);
+        remain += k->remain;
+        recharge += k->recharge;
+        if (k->online == ONLINE_YES) online++;
+    }
+    /* 合计仍按全部卡片统计，不受展示条数影响 */
+    for (int i = shown; i < campus_count(); i++) {
+        Card *k = campus_at(i);
         remain += k->remain;
         recharge += k->recharge;
         if (k->online == ONLINE_YES) online++;
     }
     j_put("],");
     kv_i("total", campus_count());   j_put(",");
+    kv_i("count", shown);            j_put(",");
+    j_put("\"listTruncated\":"); j_put(truncated ? "true" : "false"); j_put(",");
     kv_i("cardMax", campus_card_max()); j_put(",");
     /* 载入时是否有卡片因超过上限被丢弃，前端据此提示用户 */
     j_put("\"cardTruncated\":"); j_put(campus_card_truncated() ? "true" : "false");
@@ -590,12 +655,19 @@ static void h_admin_records(const char *token, const char *pwd, const char *id) 
     n = campus_load_records(id, rec, REC_MAX);
     j_init(g_buf, g_cap);
     j_put("{\"ok\":true,\"records\":[");
-    for (int i = 0; i < n; i++) { if (i) j_put(","); put_record(&rec[i]); }
-    j_fmt("],\"total\":%d}", n);
+    int shown = 0;
+    for (int i = 0; i < n; i++) {
+        if (j_full()) break;
+        if (shown++) j_put(",");
+        put_record(&rec[i]);
+    }
+    j_fmt("],\"total\":%d,\"shown\":%d}", n, shown);
 }
 /* 新卡注册（管理员或自助注册） */
 static void h_register(const char *body) {
-    char id[10] = "", name[12] = "", number[12] = "", pwd[20] = "", err[64];
+    /* 缓冲区按字段实际最大长度给足：姓名在 UTF-8 下一个汉字占 3 字节，
+     * 12 字节只够 4 个汉字，稍长就会被截断（曾导致整个响应失效）。 */
+    char id[10] = "", name[32] = "", number[20] = "", pwd[20] = "", err[64];
     j_get_str(body, "id", id, sizeof(id));
     j_get_str(body, "name", name, sizeof(name));
     j_get_str(body, "number", number, sizeof(number));

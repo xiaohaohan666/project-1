@@ -50,8 +50,10 @@ enum { ACCESS_DOOR, ACCESS_ATTEND };
 /* 校园卡（一卡通）：卡号、姓名、学号、充值数额、余额、状态，并含限额与交易密码 */
 typedef struct {
     char   id[10];              /* 卡号（同时是上机记录文件名前缀）   */
-    char   name[12];            /* 姓名                               */
-    char   number[12];          /* 学号                               */
+    char   name[24];            /* 姓名。UTF-8 下一个汉字 3 字节，
+                                   24 字节约可放 7 个汉字；旧数据 12 字节
+                                   仍能正确读入，故加宽是向后兼容的     */
+    char   number[16];          /* 学号                               */
     char   pwd[20];             /* 登录密码（同学自己设定）            */
     char   pay_pwd[20];         /* 交易密码（消费时校验）              */
     double recharge;            /* 累计充值数额（元）                 */
